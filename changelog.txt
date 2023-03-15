@@ -1,0 +1,35 @@
+v0.1
+
+-Initial version
+-Can time multiple clients, add and remove clients at will. Times persist
+over uses, but you can reset all times at any time.
+
+v0.2
+
+-Added support for shift clicking to run multiple timers at once. If you
+simple click a start button, only that timer will start. However, if you shift
+click a start button, it will begin that timer and not end currently active
+timers.
+-Stop buttons work the same way - simple clicking a stop button will end all
+active timers. Shift clicking a stop button will end only that timer.
+
+v0.3
+
+-Switched all save files and config files to store in (User)/Documents/Client Timer 1
+
+v1.1
+
+-Added +10 and -10 buttons. These buttons can be clicked at any time to add or remove 10 minutes
+from any timer. Shift clicking each button will add or remove 1 minute instead.
+-Made labels not dynamically resize between bolded and unbolded states.
+
+v1.2
+
+-Redid the GUI to be more compact, neat, and hopefully a little nicer to look at
+-Added support for various themes and size configurations
+-Added configuration menu for themes and sizes, as well as moved Reset All Times buttons here
+-Added quick link to open Saved time folder in case manual editing of times is required
+-Changed time increments to +5 and -5 per request
+-Removed the "remove client" functionality. Instead, to remove a client, simply click the x
+button on the far right of them.
+-Few minor bugfixes
