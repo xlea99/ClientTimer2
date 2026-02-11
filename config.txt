@@ -5,7 +5,7 @@
 # Here is a list of all clients that will be listed in the timer app. To add
 # an additional client, simply add a new string ('clientName') preceded with
 # a comma.
-> clientList = [Balls]
+> clientList = []
 
 #####################
 ########THEME########
