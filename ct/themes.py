@@ -140,10 +140,10 @@ THEMES = {
         "text": "#0C130D",
         "button_text": "#0C130D",
         "bg": "#E9F2E6",          # a bit deeper / greener than before
-        "button_bg": "#C9E0C5",   # darker, more “leafy”
+        "button_bg": "#C9E0C5",   # darker, more "leafy"
         "button_active": "#7EC67C",  # still bright grass, slightly richer
         "border": 0,
-        "row_dragged": "#B7D4B3",     # more “shadowed” grass
+        "row_dragged": "#B7D4B3",     # more "shadowed" grass
         "separator": "#A9BFA6",       # darker, tree-bark-ish divider
         "row_separator": "#D6E4D3",
         "group_header_bg": "#D2E3CD", # like standing under a tree shade
