@@ -215,7 +215,7 @@ class MainWindow(QMainWindow):
         if app is not None:
             app.setStyleSheet(style)
 
-        s = SIZES.get(self.size, SIZES["Regular"])
+        s = SIZES.get(self.ui_size, SIZES["Regular"])
         self._main_lay.setContentsMargins(
             s["frame_pad"], s["frame_pad"], s["frame_pad"], s["frame_pad"]
         )
@@ -607,8 +607,8 @@ class MainWindow(QMainWindow):
             lock_font = QFont("Segoe MDL2 Assets", s["action"])
         else:
             # Fallback to plain shapes (see option 2)
-            lock_char = "■"
-            unlock_char = "□"
+            lock_char = "\u25A0"
+            unlock_char = "\u25A1"
             lock_font = footer_font
 
         self._rearrange_btn = QPushButton(
