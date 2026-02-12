@@ -13,7 +13,6 @@ from PySide6.QtWidgets import (
     QColorDialog,
     QDialog,
     QInputDialog,
-    QGridLayout,
     QHBoxLayout,
     QLabel,
     QLineEdit,
@@ -186,7 +185,7 @@ class MainWindow(QMainWindow):
         self._main_lay = QVBoxLayout(central)
 
         self._grid_widget = QWidget()
-        self._grid = QGridLayout(self._grid_widget)
+        self._grid = QVBoxLayout(self._grid_widget)
         self._grid.setContentsMargins(0, 0, 0, 0)
         self._main_lay.addWidget(self._grid_widget)
 
@@ -276,11 +275,9 @@ class MainWindow(QMainWindow):
         h_spacing = s.get("h_spacing", s["padding"])
         btn_spacing = max(1, h_spacing // 2)
 
-        # Grid is now just a vertical stack — rows handle their own h-spacing
-        self._grid.setHorizontalSpacing(0)
-        self._grid.setVerticalSpacing(s.get("v_spacing", s["padding"]))
+        # Vertical stack — rows handle their own h-spacing via QHBoxLayout
+        self._grid.setSpacing(s.get("v_spacing", s["padding"]))
 
-        ncols = 6  # kept for addWidget spanning
         time_font = QFont(self.font_family, s["time"])
         action_font = QFont(self.font_family, s["action"])
 
@@ -304,9 +301,8 @@ class MainWindow(QMainWindow):
             lbl = QLabel("No clients. Add one to begin!")
             lbl.setFont(QFont(self.font_family, s["label"]))
             lbl.setAlignment(Qt.AlignCenter)
-            self._grid.addWidget(lbl, 0, 0, 1, ncols)
+            self._grid.addWidget(lbl)
             self._visible_rowids = []
-            footer_row = 1
         else:
             bold_label = QFont(self.font_family, s["label"])
             bold_label.setBold(True)
@@ -360,7 +356,6 @@ class MainWindow(QMainWindow):
             group_running_fg = t.get("group_running_text", group_header_fg)
             running_fg = t.get("running_text", t["text"])
 
-            grow = 0
             for idx, (row, is_child) in enumerate(visible_entries):
                 rid = row["rowid"]
 
@@ -584,19 +579,15 @@ class MainWindow(QMainWindow):
                     for child in rc.findChildren(QPushButton):
                         child.setCursor(Qt.ArrowCursor)
 
-                # Add the row container to the grid (spans all columns)
-                self._grid.addWidget(rc, grow, 0, 1, ncols)
-                grow += 1
-
-            footer_row = grow
+                # Add the row container to the layout
+                self._grid.addWidget(rc)
 
         # -- Footer separator --
         if self.rows:
             sep = QWidget()
             sep.setFixedHeight(2)
             sep.setStyleSheet(f"background-color: {t['separator']};")
-            self._grid.addWidget(sep, footer_row, 0, 1, ncols)
-            footer_row += 1
+            self._grid.addWidget(sep)
 
         # -- Footer (also in a container for consistent layout) --
         footer_font = QFont(self.font_family, s["action"])
@@ -669,7 +660,7 @@ class MainWindow(QMainWindow):
         f_lay.addWidget(self._add_input, 1)  # stretch to fill
         f_lay.addWidget(self._cfg_btn)
 
-        self._grid.addWidget(footer, footer_row, 0, 1, ncols)
+        self._grid.addWidget(footer)
 
         QTimer.singleShot(0, self._sync_footer_heights)
 
@@ -842,12 +833,115 @@ class MainWindow(QMainWindow):
         else:
             self._drag_hidden_rids = None
 
-        self._drag_last_row = self._visible_rowids.index(rowid)
+        # Snapshot visible rows — rows visible at drag start stay visible
+        # during drag so orphaned timers don't get "sucked up" by collapsed
+        # groups mid-drag (they settle on drop).
+        self._drag_visible_rids = set(self._visible_rowids)
+
         # Lock window size during drag to prevent layout glitches
         self.setFixedSize(self.size())
         QApplication.setOverrideCursor(Qt.ClosedHandCursor)
         QApplication.instance().installEventFilter(self)
         self._rebuild_rows()
+        # Set drag_last_row AFTER rebuild since _visible_rowids may change
+        self._drag_last_row = self._visible_rowids.index(rowid)
+
+    def _reorder_drag_visual(self):
+        """Lightweight reorder of existing row containers during drag.
+
+        Instead of destroying and recreating all widgets (which causes lag,
+        size explosion, and visual glitches), this repositions the existing
+        container widgets within the QVBoxLayout.
+        """
+        t = THEMES.get(self.theme, THEMES["Cupertino Light"])
+        s = SIZES.get(self.ui_size, SIZES["Regular"])
+
+        # Recompute visible entries (same logic as _rebuild_rows)
+        current_group_rid = None
+        visible_entries = []
+        dragging_group = (self._drag_group_rids is not None)
+
+        for row in self.rows:
+            rid = row["rowid"]
+            if row["type"] == "separator":
+                current_group_rid = rid
+                visible_entries.append((row, False))
+            else:
+                if dragging_group and rid in self._drag_group_rids:
+                    continue
+                if (self._drag_hidden_rids is not None
+                        and rid in self._drag_hidden_rids):
+                    continue
+                is_child = current_group_rid is not None
+                if (is_child
+                        and current_group_rid in self._collapsed_groups
+                        and not (dragging_group
+                                 and current_group_rid == self._dragging_client)):
+                    # Keep rows that were visible at drag start
+                    if (self._drag_visible_rids is not None
+                            and rid in self._drag_visible_rids):
+                        pass  # stay visible — settles on drop
+                    else:
+                        continue
+                visible_entries.append((row, is_child))
+
+        new_visible_rids = [r["rowid"] for r, _ in visible_entries]
+
+        # If any newly visible row has no container, fall back to full rebuild
+        for rid in new_visible_rids:
+            if rid not in self._widgets:
+                self._rebuild_rows()
+                return
+
+        self._visible_rowids = new_visible_rids
+
+        # Compute indent for child rows
+        bold_label = QFont(self.font_family, s["label"])
+        bold_label.setBold(True)
+        indent_px = QFontMetrics(bold_label).horizontalAdvance("  ")
+
+        group_header_bg = t.get("group_header_bg", t["bg"])
+
+        # Suppress repaints during the reorder
+        self._grid_widget.setUpdatesEnabled(False)
+
+        # Remove all row containers from layout (don't destroy them)
+        for rid in list(self._widgets.keys()):
+            container = self._widgets[rid].get("container")
+            if container:
+                self._grid.removeWidget(container)
+                container.hide()
+
+        # Re-insert visible containers in order (footer stays at end)
+        for insert_idx, (row, is_child) in enumerate(visible_entries):
+            rid = row["rowid"]
+            container = self._widgets[rid]["container"]
+
+            # Update background, margin, border
+            if row["type"] == "separator":
+                row_bg = row.get("bg") or group_header_bg
+            else:
+                row_bg = row.get("bg") or t["bg"]
+            if self._dragging_client == rid:
+                row_bg = t["row_dragged"]
+
+            margin_css = (f"margin-left: {indent_px - 3}px;"
+                          if row["type"] == "timer" and is_child else "")
+
+            needs_sep = (self.client_separators
+                         and insert_idx < len(visible_entries) - 1
+                         and row["type"] == "timer"
+                         and visible_entries[insert_idx + 1][0]["type"] == "timer")
+            border_css = (f"border-bottom: 1px solid {t['row_separator']};"
+                          if needs_sep else "")
+
+            container.setStyleSheet(
+                f"#rowBg {{ background-color: {row_bg}; {margin_css} {border_css} }}")
+            container.show()
+            self._grid.insertWidget(insert_idx, container)
+
+        self._grid_widget.setUpdatesEnabled(True)
+        self._grid.activate()
 
     def eventFilter(self, obj, event):
         # Global drag handling (installed on QApplication during drag)
@@ -859,6 +953,28 @@ class MainWindow(QMainWindow):
                 if target_vis is not None and target_vis != self._drag_last_row:
                     drag_rid = self._dragging_client
                     target_rid = self._visible_rowids[target_vis]
+
+                    # Separator overshoot prevention: when dragging a
+                    # separator down past another separator that has visible
+                    # children, skip the move.  The skip-children logic in
+                    # the data model would jump past the entire group in one
+                    # step, causing the separator to visually teleport and
+                    # then oscillate back.  By skipping, the separator waits
+                    # until the mouse is past the last visible child.
+                    if (target_vis > self._drag_last_row
+                            and self._drag_hidden_rids is not None):
+                        tgt_row = next(
+                            (r for r in self.rows if r["rowid"] == target_rid),
+                            None)
+                        if tgt_row and tgt_row["type"] == "separator":
+                            nxt = target_vis + 1
+                            if nxt < len(self._visible_rowids):
+                                nxt_rid = self._visible_rowids[nxt]
+                                nxt_row = next(
+                                    (r for r in self.rows
+                                     if r["rowid"] == nxt_rid), None)
+                                if nxt_row and nxt_row["type"] != "separator":
+                                    return True  # wait
 
                     if self._drag_group_rids is not None:
                         # Group drag: move separator + snapshot children as block
@@ -922,7 +1038,7 @@ class MainWindow(QMainWindow):
                         if parent is not None and parent in self._collapsed_groups:
                             self._collapsed_groups.discard(parent)
 
-                    self._rebuild_rows()
+                    self._reorder_drag_visual()
                     if drag_rid in self._visible_rowids:
                         self._drag_last_row = self._visible_rowids.index(drag_rid)
                 return True
@@ -970,15 +1086,28 @@ class MainWindow(QMainWindow):
         """Finish drag-reordering and persist the new order."""
         drag_rid = self._dragging_client
         was_group_drag = self._drag_group_rids is not None
+        visible_snapshot = self._drag_visible_rids
 
         self._dragging_client = None
         self._drag_last_row = -1
         self._drag_group_rids = None
         self._drag_hidden_rids = None
+        self._drag_visible_rids = None
 
         # Auto-expand the group on drop so user sees the new membership
         if was_group_drag and drag_rid is not None:
             self._collapsed_groups.discard(drag_rid)
+
+        # Auto-expand any collapsed separator that gained new children
+        # during the drag (prevents "where did my timer go" confusion)
+        if visible_snapshot:
+            for row in self.rows:
+                if (row["type"] == "separator"
+                        and row["rowid"] in self._collapsed_groups):
+                    for cid in self._group_children(row["rowid"]):
+                        if cid in visible_snapshot:
+                            self._collapsed_groups.discard(row["rowid"])
+                            break
 
         self._persist_client_list()
         QApplication.restoreOverrideCursor()
