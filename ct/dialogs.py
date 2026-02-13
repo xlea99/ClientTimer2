@@ -40,8 +40,7 @@ class ConfigDialog(QDialog):
         self.chosen_show_group_count = cfg.get("show_group_count", True)
         self.chosen_show_group_time = cfg.get("show_group_time", True)
         self.chosen_always_on_top = cfg.get("always_on_top", True)
-        self.chosen_backup_frequency = cfg.get("backup_frequency", 15)
-        self.chosen_max_backups = cfg.get("max_backups", 5)
+        self.chosen_snapshot_min_minutes = cfg.get("snapshot_min_minutes", 5)
         self.chosen_confirm_delete = cfg.get("confirm_delete", True)
         self.chosen_confirm_reset = cfg.get("confirm_reset", True)
         self.chosen_daily_reset_enabled = cfg.get("daily_reset_enabled", False)
@@ -126,29 +125,17 @@ class ConfigDialog(QDialog):
         row.addWidget(self._always_on_top)
         lay.addLayout(row)
 
-        # Backup Frequency
+        # Snapshot Interval
         row = QHBoxLayout()
-        lbl = QLabel("Backup Frequency:")
+        lbl = QLabel("Snapshot Interval:")
         lbl.setFont(QFont("Calibri", 12, QFont.Bold))
-        self._backup_freq = QSpinBox()
-        self._backup_freq.setRange(1, 120)
-        self._backup_freq.setValue(cfg.get("backup_frequency", 15))
-        self._backup_freq.setSuffix(" min")
-        self._backup_freq.setMinimumWidth(200)
+        self._snapshot_interval = QSpinBox()
+        self._snapshot_interval.setRange(1, 60)
+        self._snapshot_interval.setValue(cfg.get("snapshot_min_minutes", 5))
+        self._snapshot_interval.setSuffix(" min")
+        self._snapshot_interval.setMinimumWidth(200)
         row.addWidget(lbl)
-        row.addWidget(self._backup_freq)
-        lay.addLayout(row)
-
-        # Max Backups
-        row = QHBoxLayout()
-        lbl = QLabel("Max Backups:")
-        lbl.setFont(QFont("Calibri", 12, QFont.Bold))
-        self._max_backups = QSpinBox()
-        self._max_backups.setRange(1, 100)
-        self._max_backups.setValue(cfg.get("max_backups", 5))
-        self._max_backups.setMinimumWidth(200)
-        row.addWidget(lbl)
-        row.addWidget(self._max_backups)
+        row.addWidget(self._snapshot_interval)
         lay.addLayout(row)
 
         # Confirm Delete
@@ -585,8 +572,7 @@ class ConfigDialog(QDialog):
         # General
         self.chosen_always_on_top = (
             self._always_on_top.currentText() == "Always On Top")
-        self.chosen_backup_frequency = self._backup_freq.value()
-        self.chosen_max_backups = self._max_backups.value()
+        self.chosen_snapshot_min_minutes = self._snapshot_interval.value()
         self.chosen_confirm_delete = (
             self._confirm_delete.currentText() == "Yes")
         self.chosen_confirm_reset = (
