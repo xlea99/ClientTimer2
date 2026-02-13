@@ -94,7 +94,6 @@ Everything is visualized with a tiny lock icon that you *will* grow attached to 
   - `Frequent Fliers`
   - `Verizon`
   - `Random Fires`
-  - `If This Is Running Something Is Seriously Wrong`
 
 - Collapse them to hide child timers when you’re not emotionally prepared to see them.
 
@@ -190,5 +189,5 @@ All delightfully demonstrated in a live preview, so you don't even have to close
 1. Clone the repo:
 
    ```bash
-   git clone https://github.com/yourname/ClientTimer2.git
+   git clone https://github.com/xlea99/ClientTimer2.git
    cd ClientTimer2
