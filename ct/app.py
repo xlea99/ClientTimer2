@@ -1,10 +1,9 @@
 """Main application module — MainWindow and timer logic."""
 
 import ctypes
-import os
 import re
 import sys
-from datetime import date, datetime
+from datetime import datetime, timedelta
 
 from PySide6.QtCore import Qt, QEvent, QSize, QTimer
 from PySide6.QtGui import QColor, QFont, QFontDatabase, QFontMetrics, QIcon, QPixmap
@@ -13,7 +12,6 @@ from PySide6.QtWidgets import (
     QColorDialog,
     QDialog,
     QInputDialog,
-    QGridLayout,
     QHBoxLayout,
     QLabel,
     QLineEdit,
@@ -27,7 +25,7 @@ from PySide6.QtWidgets import (
 )
 
 from ct import config
-from ct.backup import create_backup
+from ct.backup import create_snapshot, prune_snapshots, SnapshotScheduler
 from ct.dialogs import ConfigDialog
 from ct.state import ClientState
 from ct.themes import THEMES, SIZES, FONTS
@@ -122,34 +120,47 @@ class MainWindow(QMainWindow):
         _blank.fill(Qt.transparent)
         self.setWindowIcon(QIcon(_blank))
 
-        # -- Load config --
-        cfg = config.load_config()
-        self.theme = cfg["theme"] if cfg["theme"] in THEMES else "Cupertino Light"
-        self.ui_size = cfg["size"] if cfg["size"] in SIZES else "Regular"
-        self.label_align = cfg.get("label_align", "Left")
-        self.client_separators = cfg.get("client_separators", False)
-        self.show_group_count = cfg.get("show_group_count", True)
-        self.show_group_time = cfg.get("show_group_time", True)
-        self.font_family = cfg.get("font", "Calibri")
-        self.always_on_top = cfg.get("always_on_top", True)
-        self.backup_frequency = cfg.get("backup_frequency", 15)
-        self.max_backups = cfg.get("max_backups", 5)
-        self.confirm_delete = cfg.get("confirm_delete", True)
-        self.confirm_reset = cfg.get("confirm_reset", True)
-        self.daily_reset_enabled = cfg.get("daily_reset_enabled", False)
-        self.daily_reset_time = cfg.get("daily_reset_time", "00:00")
+        # -- Load unified state --
+        state = config.load_state()
+        s = state["settings"]
+        self.theme = s["theme"] if s["theme"] in THEMES else "Cupertino Light"
+        self.ui_size = s["size"] if s["size"] in SIZES else "Regular"
+        self.label_align = s.get("label_align", "Left")
+        self.client_separators = s.get("client_separators", False)
+        self.show_group_count = s.get("show_group_count", True)
+        self.show_group_time = s.get("show_group_time", True)
+        self.font_family = s.get("font", "Calibri")
+        self.always_on_top = s.get("always_on_top", True)
+        self.confirm_delete = s.get("confirm_delete", True)
+        self.confirm_reset = s.get("confirm_reset", True)
+        self.daily_reset_enabled = s.get("daily_reset_enabled", False)
+        self.daily_reset_time = s.get("daily_reset_time", "00:00")
+        self.snapshot_min_minutes = s.get("snapshot_min_minutes", 5)
 
         if self.always_on_top:
             self.setWindowFlags(self.windowFlags() | Qt.WindowStaysOnTopHint)
 
-        # -- Row data --
-        # Each row: {"rowid": int, "name": str, "type": "timer"|"separator", "bg": str|None}
-        self.rows = list(cfg["clients"])
+        # -- Layout --
+        layout = state["layout"]
+        self.rows = list(layout["rows"])
         self._next_rowid = max((r["rowid"] for r in self.rows), default=-1) + 1
+        self._collapsed_groups = set(layout.get("collapsed_groups", []))
+
+        # -- Session --
+        session = state["session"]
+        self._session_start = datetime.fromisoformat(session["start"])
+        tracked = session.get("tracked_times", {})
+
         self.clients = {}  # rowid -> ClientState (timers only)
         for row in self.rows:
             if row["type"] == "timer":
-                self.clients[row["rowid"]] = ClientState(row["name"])
+                rid = row["rowid"]
+                tt = tracked.get(str(rid), {})
+                self.clients[rid] = ClientState(
+                    row["name"],
+                    elapsed=tt.get("elapsed", 0.0),
+                    running_since=tt.get("running_since"),
+                )
 
         self._widgets = {}        # rowid -> widget dict
         self._has_mdl2 = "Segoe MDL2 Assets" in QFontDatabase.families()
@@ -159,26 +170,16 @@ class MainWindow(QMainWindow):
         self._drag_last_row = -1
         self._drag_group_rids = None  # set of rowids when dragging collapsed group
         self._drag_hidden_rids = None  # snapshot of hidden rids during separator drag
-        self._collapsed_groups = set(cfg.get("collapsed_groups", []))
         self._visible_rowids = []  # populated by _rebuild_rows
-        self._last_reset_date = None  # daily auto-reset tracking
 
-        # -- Restore today's save (before building UI) --
-        saved = config.load_times()
-        if saved:
-            for key, elapsed in saved.items():
-                try:
-                    rid = int(key)
-                    if rid in self.clients:
-                        self.clients[rid].elapsed = elapsed
-                except ValueError:
-                    # Old name-based format — match by name
-                    for row in self.rows:
-                        if row["type"] == "timer" and row["name"] == key:
-                            rid = row["rowid"]
-                            if rid in self.clients:
-                                self.clients[rid].elapsed = elapsed
-                            break
+        # -- Snapshot scheduler --
+        self._snapshot_scheduler = SnapshotScheduler(
+            min_interval=self.snapshot_min_minutes * 60,
+        )
+
+        # -- Check for missed daily reset at startup --
+        if self.daily_reset_enabled:
+            self._check_daily_reset_boundary()
 
         # -- Build UI skeleton --
         central = QWidget()
@@ -186,7 +187,7 @@ class MainWindow(QMainWindow):
         self._main_lay = QVBoxLayout(central)
 
         self._grid_widget = QWidget()
-        self._grid = QGridLayout(self._grid_widget)
+        self._grid = QVBoxLayout(self._grid_widget)
         self._grid.setContentsMargins(0, 0, 0, 0)
         self._main_lay.addWidget(self._grid_widget)
 
@@ -276,11 +277,9 @@ class MainWindow(QMainWindow):
         h_spacing = s.get("h_spacing", s["padding"])
         btn_spacing = max(1, h_spacing // 2)
 
-        # Grid is now just a vertical stack — rows handle their own h-spacing
-        self._grid.setHorizontalSpacing(0)
-        self._grid.setVerticalSpacing(s.get("v_spacing", s["padding"]))
+        # Vertical stack — rows handle their own h-spacing via QHBoxLayout
+        self._grid.setSpacing(s.get("v_spacing", s["padding"]))
 
-        ncols = 6  # kept for addWidget spanning
         time_font = QFont(self.font_family, s["time"])
         action_font = QFont(self.font_family, s["action"])
 
@@ -304,9 +303,8 @@ class MainWindow(QMainWindow):
             lbl = QLabel("No clients. Add one to begin!")
             lbl.setFont(QFont(self.font_family, s["label"]))
             lbl.setAlignment(Qt.AlignCenter)
-            self._grid.addWidget(lbl, 0, 0, 1, ncols)
+            self._grid.addWidget(lbl)
             self._visible_rowids = []
-            footer_row = 1
         else:
             bold_label = QFont(self.font_family, s["label"])
             bold_label.setBold(True)
@@ -360,7 +358,6 @@ class MainWindow(QMainWindow):
             group_running_fg = t.get("group_running_text", group_header_fg)
             running_fg = t.get("running_text", t["text"])
 
-            grow = 0
             for idx, (row, is_child) in enumerate(visible_entries):
                 rid = row["rowid"]
 
@@ -584,19 +581,15 @@ class MainWindow(QMainWindow):
                     for child in rc.findChildren(QPushButton):
                         child.setCursor(Qt.ArrowCursor)
 
-                # Add the row container to the grid (spans all columns)
-                self._grid.addWidget(rc, grow, 0, 1, ncols)
-                grow += 1
-
-            footer_row = grow
+                # Add the row container to the layout
+                self._grid.addWidget(rc)
 
         # -- Footer separator --
         if self.rows:
             sep = QWidget()
             sep.setFixedHeight(2)
             sep.setStyleSheet(f"background-color: {t['separator']};")
-            self._grid.addWidget(sep, footer_row, 0, 1, ncols)
-            footer_row += 1
+            self._grid.addWidget(sep)
 
         # -- Footer (also in a container for consistent layout) --
         footer_font = QFont(self.font_family, s["action"])
@@ -669,7 +662,7 @@ class MainWindow(QMainWindow):
         f_lay.addWidget(self._add_input, 1)  # stretch to fill
         f_lay.addWidget(self._cfg_btn)
 
-        self._grid.addWidget(footer, footer_row, 0, 1, ncols)
+        self._grid.addWidget(footer)
 
         QTimer.singleShot(0, self._sync_footer_heights)
 
@@ -728,6 +721,8 @@ class MainWindow(QMainWindow):
         minutes = 1 if (QApplication.keyboardModifiers() & Qt.ShiftModifier) else 5
         self.clients[rowid].adjust(direction * minutes * 60)
         self._update_display(rowid)
+        self._save_state()
+        self._snapshot_scheduler.request("timer_adjustment")
 
     def _on_add(self):
         raw = self._add_input.text().strip()
@@ -738,7 +733,8 @@ class MainWindow(QMainWindow):
         self._next_rowid += 1
         self.rows.append({"rowid": rid, "name": name, "type": "timer", "bg": None})
         self.clients[rid] = ClientState(name)
-        self._persist_client_list()
+        self._save_state()
+        self._snapshot_scheduler.request("layout_change")
         self._rebuild_rows()
 
     def _on_add_group(self):
@@ -749,7 +745,8 @@ class MainWindow(QMainWindow):
         rid = self._next_rowid
         self._next_rowid += 1
         self.rows.append({"rowid": rid, "name": name, "type": "separator", "bg": None})
-        self._persist_client_list()
+        self._save_state()
+        self._snapshot_scheduler.request("layout_change")
         self._rebuild_rows()
 
     def _on_remove_group(self, rowid):
@@ -764,7 +761,8 @@ class MainWindow(QMainWindow):
                 return
         self._collapsed_groups.discard(rowid)
         self.rows = [r for r in self.rows if r["rowid"] != rowid]
-        self._persist_client_list()
+        self._save_state()
+        self._snapshot_scheduler.request("layout_change")
         self._rebuild_rows()
         QTimer.singleShot(0, self.adjustSize)
 
@@ -774,7 +772,7 @@ class MainWindow(QMainWindow):
             self._collapsed_groups.discard(rowid)
         else:
             self._collapsed_groups.add(rowid)
-        self._persist_client_list()
+        self._save_state()
         self._rebuild_rows()
         QTimer.singleShot(0, self.adjustSize)
 
@@ -804,7 +802,8 @@ class MainWindow(QMainWindow):
             self.clients[rowid].stop()
             del self.clients[rowid]
             self.rows = [r for r in self.rows if r["rowid"] != rowid]
-            self._persist_client_list()
+            self._save_state()
+            self._snapshot_scheduler.request("layout_change")
             self._rebuild_rows()
             QTimer.singleShot(0, self.adjustSize)
 
@@ -842,12 +841,115 @@ class MainWindow(QMainWindow):
         else:
             self._drag_hidden_rids = None
 
-        self._drag_last_row = self._visible_rowids.index(rowid)
+        # Snapshot visible rows — rows visible at drag start stay visible
+        # during drag so orphaned timers don't get "sucked up" by collapsed
+        # groups mid-drag (they settle on drop).
+        self._drag_visible_rids = set(self._visible_rowids)
+
         # Lock window size during drag to prevent layout glitches
         self.setFixedSize(self.size())
         QApplication.setOverrideCursor(Qt.ClosedHandCursor)
         QApplication.instance().installEventFilter(self)
         self._rebuild_rows()
+        # Set drag_last_row AFTER rebuild since _visible_rowids may change
+        self._drag_last_row = self._visible_rowids.index(rowid)
+
+    def _reorder_drag_visual(self):
+        """Lightweight reorder of existing row containers during drag.
+
+        Instead of destroying and recreating all widgets (which causes lag,
+        size explosion, and visual glitches), this repositions the existing
+        container widgets within the QVBoxLayout.
+        """
+        t = THEMES.get(self.theme, THEMES["Cupertino Light"])
+        s = SIZES.get(self.ui_size, SIZES["Regular"])
+
+        # Recompute visible entries (same logic as _rebuild_rows)
+        current_group_rid = None
+        visible_entries = []
+        dragging_group = (self._drag_group_rids is not None)
+
+        for row in self.rows:
+            rid = row["rowid"]
+            if row["type"] == "separator":
+                current_group_rid = rid
+                visible_entries.append((row, False))
+            else:
+                if dragging_group and rid in self._drag_group_rids:
+                    continue
+                if (self._drag_hidden_rids is not None
+                        and rid in self._drag_hidden_rids):
+                    continue
+                is_child = current_group_rid is not None
+                if (is_child
+                        and current_group_rid in self._collapsed_groups
+                        and not (dragging_group
+                                 and current_group_rid == self._dragging_client)):
+                    # Keep rows that were visible at drag start
+                    if (self._drag_visible_rids is not None
+                            and rid in self._drag_visible_rids):
+                        pass  # stay visible — settles on drop
+                    else:
+                        continue
+                visible_entries.append((row, is_child))
+
+        new_visible_rids = [r["rowid"] for r, _ in visible_entries]
+
+        # If any newly visible row has no container, fall back to full rebuild
+        for rid in new_visible_rids:
+            if rid not in self._widgets:
+                self._rebuild_rows()
+                return
+
+        self._visible_rowids = new_visible_rids
+
+        # Compute indent for child rows
+        bold_label = QFont(self.font_family, s["label"])
+        bold_label.setBold(True)
+        indent_px = QFontMetrics(bold_label).horizontalAdvance("  ")
+
+        group_header_bg = t.get("group_header_bg", t["bg"])
+
+        # Suppress repaints during the reorder
+        self._grid_widget.setUpdatesEnabled(False)
+
+        # Remove all row containers from layout (don't destroy them)
+        for rid in list(self._widgets.keys()):
+            container = self._widgets[rid].get("container")
+            if container:
+                self._grid.removeWidget(container)
+                container.hide()
+
+        # Re-insert visible containers in order (footer stays at end)
+        for insert_idx, (row, is_child) in enumerate(visible_entries):
+            rid = row["rowid"]
+            container = self._widgets[rid]["container"]
+
+            # Update background, margin, border
+            if row["type"] == "separator":
+                row_bg = row.get("bg") or group_header_bg
+            else:
+                row_bg = row.get("bg") or t["bg"]
+            if self._dragging_client == rid:
+                row_bg = t["row_dragged"]
+
+            margin_css = (f"margin-left: {indent_px - 3}px;"
+                          if row["type"] == "timer" and is_child else "")
+
+            needs_sep = (self.client_separators
+                         and insert_idx < len(visible_entries) - 1
+                         and row["type"] == "timer"
+                         and visible_entries[insert_idx + 1][0]["type"] == "timer")
+            border_css = (f"border-bottom: 1px solid {t['row_separator']};"
+                          if needs_sep else "")
+
+            container.setStyleSheet(
+                f"#rowBg {{ background-color: {row_bg}; {margin_css} {border_css} }}")
+            container.show()
+            self._grid.insertWidget(insert_idx, container)
+
+        self._grid_widget.setUpdatesEnabled(True)
+        self._grid.activate()
 
     def eventFilter(self, obj, event):
         # Global drag handling (installed on QApplication during drag)
@@ -859,6 +961,28 @@ class MainWindow(QMainWindow):
                 if target_vis is not None and target_vis != self._drag_last_row:
                     drag_rid = self._dragging_client
                     target_rid = self._visible_rowids[target_vis]
+
+                    # Separator overshoot prevention: when dragging a
+                    # separator down past another separator that has visible
+                    # children, skip the move.  The skip-children logic in
+                    # the data model would jump past the entire group in one
+                    # step, causing the separator to visually teleport and
+                    # then oscillate back.  By skipping, the separator waits
+                    # until the mouse is past the last visible child.
+                    if (target_vis > self._drag_last_row
+                            and self._drag_hidden_rids is not None):
+                        tgt_row = next(
+                            (r for r in self.rows if r["rowid"] == target_rid),
+                            None)
+                        if tgt_row and tgt_row["type"] == "separator":
+                            nxt = target_vis + 1
+                            if nxt < len(self._visible_rowids):
+                                nxt_rid = self._visible_rowids[nxt]
+                                nxt_row = next(
+                                    (r for r in self.rows
+                                     if r["rowid"] == nxt_rid), None)
+                                if nxt_row and nxt_row["type"] != "separator":
+                                    return True  # wait
 
                     if self._drag_group_rids is not None:
                         # Group drag: move separator + snapshot children as block
@@ -922,7 +1046,7 @@ class MainWindow(QMainWindow):
                         if parent is not None and parent in self._collapsed_groups:
                             self._collapsed_groups.discard(parent)
 
-                    self._rebuild_rows()
+                    self._reorder_drag_visual()
                     if drag_rid in self._visible_rowids:
                         self._drag_last_row = self._visible_rowids.index(drag_rid)
                 return True
@@ -970,17 +1094,31 @@ class MainWindow(QMainWindow):
         """Finish drag-reordering and persist the new order."""
         drag_rid = self._dragging_client
         was_group_drag = self._drag_group_rids is not None
+        visible_snapshot = self._drag_visible_rids
 
         self._dragging_client = None
         self._drag_last_row = -1
         self._drag_group_rids = None
         self._drag_hidden_rids = None
+        self._drag_visible_rids = None
 
         # Auto-expand the group on drop so user sees the new membership
         if was_group_drag and drag_rid is not None:
             self._collapsed_groups.discard(drag_rid)
 
-        self._persist_client_list()
+        # Auto-expand any collapsed separator that gained new children
+        # during the drag (prevents "where did my timer go" confusion)
+        if visible_snapshot:
+            for row in self.rows:
+                if (row["type"] == "separator"
+                        and row["rowid"] in self._collapsed_groups):
+                    for cid in self._group_children(row["rowid"]):
+                        if cid in visible_snapshot:
+                            self._collapsed_groups.discard(row["rowid"])
+                            break
+
+        self._save_state()
+        self._snapshot_scheduler.request("layout_change")
         QApplication.restoreOverrideCursor()
         QApplication.instance().removeEventFilter(self)
         # Unlock window size (was locked at drag start)
@@ -1045,7 +1183,8 @@ class MainWindow(QMainWindow):
                     row["name"] = new_name
                     if is_timer and rowid in self.clients:
                         self.clients[rowid].name = new_name
-                    self._persist_client_list()
+                    self._save_state()
+                    self._snapshot_scheduler.request("layout_change")
                     self._rebuild_rows()
         elif action == set_color:
             current_bg = row.get("bg")
@@ -1064,11 +1203,13 @@ class MainWindow(QMainWindow):
             )
             if cdlg.exec() == QDialog.Accepted:
                 row["bg"] = cdlg.currentColor().name()
-                self._persist_client_list()
+                self._save_state()
+                self._snapshot_scheduler.request("layout_change")
                 self._rebuild_rows()
         elif action == reset_color:
             row["bg"] = None
-            self._persist_client_list()
+            self._save_state()
+            self._snapshot_scheduler.request("layout_change")
             self._rebuild_rows()
         elif is_timer and action == set_time:
             current = _format_time(self.clients[rowid].current_elapsed)
@@ -1102,7 +1243,8 @@ class MainWindow(QMainWindow):
             else:
                 self._collapsed_groups.discard(rowid)
             self.rows = [r for r in self.rows if r["rowid"] != rowid]
-            self._persist_client_list()
+            self._save_state()
+            self._snapshot_scheduler.request("layout_change")
             self._rebuild_rows()
             QTimer.singleShot(0, self.adjustSize)
 
@@ -1122,21 +1264,21 @@ class MainWindow(QMainWindow):
         return None
 
     def _on_config(self):
-        cfg = config.load_config()
-        cfg["theme"] = self.theme
-        cfg["size"] = self.ui_size
-        cfg["font"] = self.font_family
-        cfg["label_align"] = self.label_align
-        cfg["client_separators"] = self.client_separators
-        cfg["show_group_count"] = self.show_group_count
-        cfg["show_group_time"] = self.show_group_time
-        cfg["always_on_top"] = self.always_on_top
-        cfg["backup_frequency"] = self.backup_frequency
-        cfg["max_backups"] = self.max_backups
-        cfg["confirm_delete"] = self.confirm_delete
-        cfg["confirm_reset"] = self.confirm_reset
-        cfg["daily_reset_enabled"] = self.daily_reset_enabled
-        cfg["daily_reset_time"] = self.daily_reset_time
+        cfg = {
+            "theme": self.theme,
+            "size": self.ui_size,
+            "font": self.font_family,
+            "label_align": self.label_align,
+            "client_separators": self.client_separators,
+            "show_group_count": self.show_group_count,
+            "show_group_time": self.show_group_time,
+            "always_on_top": self.always_on_top,
+            "confirm_delete": self.confirm_delete,
+            "confirm_reset": self.confirm_reset,
+            "daily_reset_enabled": self.daily_reset_enabled,
+            "daily_reset_time": self.daily_reset_time,
+            "snapshot_min_minutes": self.snapshot_min_minutes,
+        }
 
         dlg = ConfigDialog(self, cfg, on_reset=self._reset_all)
         if dlg.exec() == QDialog.Accepted and dlg.style_changed:
@@ -1150,28 +1292,17 @@ class MainWindow(QMainWindow):
             self.show_group_count = dlg.chosen_show_group_count
             self.show_group_time = dlg.chosen_show_group_time
             self.always_on_top = dlg.chosen_always_on_top
-            self.backup_frequency = dlg.chosen_backup_frequency
-            self.max_backups = dlg.chosen_max_backups
             self.confirm_delete = dlg.chosen_confirm_delete
             self.confirm_reset = dlg.chosen_confirm_reset
             self.daily_reset_enabled = dlg.chosen_daily_reset_enabled
             self.daily_reset_time = dlg.chosen_daily_reset_time
+            self.snapshot_min_minutes = dlg.chosen_snapshot_min_minutes
 
-            cfg["theme"] = self.theme
-            cfg["size"] = self.ui_size
-            cfg["font"] = self.font_family
-            cfg["label_align"] = self.label_align
-            cfg["client_separators"] = self.client_separators
-            cfg["show_group_count"] = self.show_group_count
-            cfg["show_group_time"] = self.show_group_time
-            cfg["always_on_top"] = self.always_on_top
-            cfg["backup_frequency"] = self.backup_frequency
-            cfg["max_backups"] = self.max_backups
-            cfg["confirm_delete"] = self.confirm_delete
-            cfg["confirm_reset"] = self.confirm_reset
-            cfg["daily_reset_enabled"] = self.daily_reset_enabled
-            cfg["daily_reset_time"] = self.daily_reset_time
-            config.save_config(cfg)
+            # Update snapshot scheduler interval
+            self._snapshot_scheduler._min_interval = self.snapshot_min_minutes * 60
+
+            self._save_state()
+            self._snapshot_scheduler.request("settings_change")
 
             self._apply_style()
             self._rebuild_rows()
@@ -1320,7 +1451,7 @@ class MainWindow(QMainWindow):
                 self._add_group_btn.setFixedHeight(h)
 
     # ------------------------------------------------------------------ #
-    #  Tick / autosave / backup                                            #
+    #  Tick / autosave / snapshots                                         #
     # ------------------------------------------------------------------ #
 
     def _tick(self):
@@ -1344,44 +1475,116 @@ class MainWindow(QMainWindow):
 
         # Daily auto-reset check
         if self.daily_reset_enabled:
-            now = datetime.now()
-            try:
-                rh, rm = map(int, self.daily_reset_time.split(":"))
-            except ValueError:
-                rh, rm = 0, 0
-            if (now.hour == rh and now.minute == rm
-                    and self._last_reset_date != date.today()):
-                self._last_reset_date = date.today()
-                self._stop_all()
-                for state in self.clients.values():
-                    state.reset()
-                self._update_all_displays()
-                self._save_times()
+            self._check_daily_reset_boundary()
 
+        # Periodic autosave (every ~20 seconds)
         self._tick_n += 1
         if self._tick_n % 20 == 0:
-            self._save_times()
-        backup_ticks = max(60, self.backup_frequency * 60)
-        if self._tick_n % backup_ticks == 0:
-            create_backup(config.SAVE_PATH, config.BACKUP_DIR,
-                          limit=self.max_backups)
+            self._save_state()
 
-    def _save_times(self):
-        times = {}
-        for rid, state in self.clients.items():
-            state.freeze()
-            times[str(rid)] = state.elapsed
-        config.save_times(times)
+        # Snapshot check (debounced / periodic)
+        should, reason = self._snapshot_scheduler.check()
+        if should:
+            self._do_snapshot(reason)
 
     # ------------------------------------------------------------------ #
     #  Persistence helpers                                                 #
     # ------------------------------------------------------------------ #
 
-    def _persist_client_list(self):
-        cfg = config.load_config()
-        cfg["clients"] = list(self.rows)
-        cfg["collapsed_groups"] = list(self._collapsed_groups)
-        config.save_config(cfg)
+    def _build_state_dict(self):
+        """Compose the full state.json dict from in-memory state."""
+        tracked = {}
+        for rid, st in self.clients.items():
+            st.freeze()
+            entry = {"elapsed": st.elapsed}
+            if st.running and st.started_at:
+                entry["running_since"] = st.started_at.isoformat()
+            tracked[str(rid)] = entry
+
+        return {
+            "meta": {
+                "schema_version": 1,
+                "saved_at": config.now_iso(),
+                "is_completed_session": False,
+            },
+            "layout": {
+                "rows": list(self.rows),
+                "collapsed_groups": list(self._collapsed_groups),
+            },
+            "settings": {
+                "theme": self.theme,
+                "size": self.ui_size,
+                "font": self.font_family,
+                "label_align": self.label_align,
+                "client_separators": self.client_separators,
+                "show_group_count": self.show_group_count,
+                "show_group_time": self.show_group_time,
+                "always_on_top": self.always_on_top,
+                "confirm_delete": self.confirm_delete,
+                "confirm_reset": self.confirm_reset,
+                "daily_reset_enabled": self.daily_reset_enabled,
+                "daily_reset_time": self.daily_reset_time,
+                "snapshot_min_minutes": self.snapshot_min_minutes,
+            },
+            "session": {
+                "start": self._session_start.isoformat(),
+                "tracked_times": tracked,
+            },
+        }
+
+    def _save_state(self):
+        """Persist full app state to state.json."""
+        state = self._build_state_dict()
+        config.save_state(state)
+        return state
+
+    def _do_snapshot(self, reason, priority="normal"):
+        """Create a snapshot and prune old ones."""
+        state = self._save_state()
+        create_snapshot(state, config.SNAPSHOT_DIR, reason, priority)
+        prune_snapshots(config.SNAPSHOT_DIR)
+        self._snapshot_scheduler.mark_done()
+
+    # ------------------------------------------------------------------ #
+    #  Daily reset                                                         #
+    # ------------------------------------------------------------------ #
+
+    def _most_recent_reset_boundary(self):
+        """Compute the most recent daily reset boundary as an aware datetime."""
+        try:
+            rh, rm = map(int, self.daily_reset_time.split(":"))
+        except ValueError:
+            rh, rm = 0, 0
+
+        now = datetime.now().astimezone()
+        boundary_today = now.replace(hour=rh, minute=rm, second=0, microsecond=0)
+        if now >= boundary_today:
+            return boundary_today
+        return boundary_today - timedelta(days=1)
+
+    def _check_daily_reset_boundary(self):
+        """If the reset boundary was crossed since session start, do the reset."""
+        boundary = self._most_recent_reset_boundary()
+        if self._session_start < boundary:
+            self._do_daily_reset(boundary)
+
+    def _do_daily_reset(self, boundary_dt):
+        """Finalize current session, reset timers, start new session."""
+        # Write the current session as a completed session file
+        state = self._build_state_dict()
+        config.save_completed_session(state, boundary_dt)
+
+        # Reset all timers
+        self._stop_all()
+        for st in self.clients.values():
+            st.reset()
+        self._update_all_displays()
+
+        # Start new session at the boundary
+        self._session_start = boundary_dt
+
+        # Snapshot the fresh session
+        self._do_snapshot("daily_reset_rollover", "high")
 
     # ------------------------------------------------------------------ #
     #  Window close                                                        #
@@ -1389,10 +1592,10 @@ class MainWindow(QMainWindow):
 
     def closeEvent(self, event):
         try:
-            self._save_times()
+            self._do_snapshot("app_exit", "high")
         except Exception as e:
             QMessageBox.warning(self, "Save Error",
-                                f"Failed to save times:\n{e}")
+                                f"Failed to save state:\n{e}")
         event.accept()
 
 
