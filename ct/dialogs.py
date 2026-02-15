@@ -57,6 +57,7 @@ class ConfigDialog(QDialog):
         self._tab_list.setFixedWidth(140)
         self._tab_list.setFont(QFont("Calibri", 12))
         self._tab_list.addItem("General")
+        self._tab_list.addItem("Daily Reset")
         self._tab_list.addItem("Appearance")
         self._tab_list.setCurrentRow(0)
         self._tab_list.currentRowChanged.connect(self._on_tab_changed)
@@ -65,6 +66,7 @@ class ConfigDialog(QDialog):
         # Right content
         self._stack = QStackedWidget()
         self._stack.addWidget(self._build_general_page(cfg, on_reset))
+        self._stack.addWidget(self._build_daily_reset_page(cfg))
         self._stack.addWidget(self._build_appearance_page(cfg))
         body.addWidget(self._stack, 1)
 
@@ -96,8 +98,15 @@ class ConfigDialog(QDialog):
             current_aot != self._initial_always_on_top)
 
     def _on_daily_reset_toggle(self):
-        self._daily_reset_time.setEnabled(
-            self._daily_reset.currentText() == "On")
+        enabled = self._daily_reset.currentText() == "On"
+        # Enable/disable child controls
+        for widget in self._dr_child_widgets:
+            widget.setEnabled(enabled)
+        # Gray out/restore child labels
+        t = THEMES.get(self.chosen_theme, THEMES["Cupertino Light"])
+        color = t["text"] if enabled else t.get("text_grayed_out", "#888888")
+        for lbl in self._dr_child_labels:
+            lbl.setStyleSheet(f"color: {color};")
 
     # ------------------------------------------------------------------ #
     #  General page                                                        #
@@ -111,7 +120,9 @@ class ConfigDialog(QDialog):
         # Window Behavior
         row = QHBoxLayout()
         lbl = QLabel("Window Behavior:")
+        window_behavior_tooltip = "Always On Top: Will remain as a focused window even while clicking on other windows.\n\nNormal Window: Behaves like a normal window."
         lbl.setFont(QFont("Calibri", 12, QFont.Bold))
+        lbl.setToolTip(window_behavior_tooltip)
         self._always_on_top = QComboBox()
         self._always_on_top.addItems(["Always On Top", "Normal Window"])
         self._always_on_top.setCurrentText(
@@ -119,6 +130,7 @@ class ConfigDialog(QDialog):
             else "Normal Window"
         )
         self._always_on_top.setMinimumWidth(200)
+        self._always_on_top.setToolTip(window_behavior_tooltip)
         self._always_on_top.currentTextChanged.connect(
             self._check_restart_needed)
         row.addWidget(lbl)
@@ -128,12 +140,15 @@ class ConfigDialog(QDialog):
         # Snapshot Interval
         row = QHBoxLayout()
         lbl = QLabel("Snapshot Interval:")
+        snapshot_interval_tooltip = "Will try to keep a fresh snapshot/backup of the current user configuration every N minutes."
         lbl.setFont(QFont("Calibri", 12, QFont.Bold))
+        lbl.setToolTip(snapshot_interval_tooltip)
         self._snapshot_interval = QSpinBox()
         self._snapshot_interval.setRange(1, 60)
         self._snapshot_interval.setValue(cfg.get("snapshot_min_minutes", 5))
         self._snapshot_interval.setSuffix(" min")
         self._snapshot_interval.setMinimumWidth(200)
+        self._snapshot_interval.setToolTip(snapshot_interval_tooltip)
         row.addWidget(lbl)
         row.addWidget(self._snapshot_interval)
         lay.addLayout(row)
@@ -141,12 +156,15 @@ class ConfigDialog(QDialog):
         # Confirm Delete
         row = QHBoxLayout()
         lbl = QLabel("Confirm Delete:")
+        confirm_delete_tooltip = "Whether to prompt the user for confirmation when trying to delete a row."
         lbl.setFont(QFont("Calibri", 12, QFont.Bold))
+        lbl.setToolTip(confirm_delete_tooltip)
         self._confirm_delete = QComboBox()
         self._confirm_delete.addItems(["Yes", "No"])
         self._confirm_delete.setCurrentText(
             "Yes" if cfg.get("confirm_delete", True) else "No")
         self._confirm_delete.setMinimumWidth(200)
+        self._confirm_delete.setToolTip(confirm_delete_tooltip)
         row.addWidget(lbl)
         row.addWidget(self._confirm_delete)
         lay.addLayout(row)
@@ -154,40 +172,17 @@ class ConfigDialog(QDialog):
         # Confirm Reset
         row = QHBoxLayout()
         lbl = QLabel("Confirm Reset:")
+        confirm_reset_tooltip = "Whether to prompt the user for confirmation when trying to reset a timer."
         lbl.setFont(QFont("Calibri", 12, QFont.Bold))
+        lbl.setToolTip(confirm_reset_tooltip)
         self._confirm_reset = QComboBox()
         self._confirm_reset.addItems(["Yes", "No"])
         self._confirm_reset.setCurrentText(
             "Yes" if cfg.get("confirm_reset", True) else "No")
         self._confirm_reset.setMinimumWidth(200)
+        self._confirm_reset.setToolTip(confirm_reset_tooltip)
         row.addWidget(lbl)
         row.addWidget(self._confirm_reset)
-        lay.addLayout(row)
-
-        # Daily Reset
-        row = QHBoxLayout()
-        lbl = QLabel("Daily Reset:")
-        lbl.setFont(QFont("Calibri", 12, QFont.Bold))
-        self._daily_reset = QComboBox()
-        self._daily_reset.addItems(["Off", "On"])
-        self._daily_reset.setCurrentText(
-            "On" if cfg.get("daily_reset_enabled", False) else "Off")
-        self._daily_reset.setMinimumWidth(80)
-        self._daily_reset.currentTextChanged.connect(
-            self._on_daily_reset_toggle)
-        self._daily_reset_time = QTimeEdit()
-        self._daily_reset_time.setButtonSymbols(QAbstractSpinBox.NoButtons)
-        try:
-            h, m = map(int, cfg.get("daily_reset_time", "00:00").split(":"))
-        except ValueError:
-            h, m = 0, 0
-        self._daily_reset_time.setTime(QTime(h, m))
-        self._daily_reset_time.setDisplayFormat("hh:mm AP")
-        self._daily_reset_time.setEnabled(
-            cfg.get("daily_reset_enabled", False))
-        row.addWidget(lbl)
-        row.addWidget(self._daily_reset)
-        row.addWidget(self._daily_reset_time)
         lay.addLayout(row)
 
         # Separator
@@ -201,11 +196,11 @@ class ConfigDialog(QDialog):
         reset_btn = QPushButton("Reset All Times")
         reset_btn.setFont(QFont("Calibri", 11))
         reset_btn.clicked.connect(on_reset)
-        folder_btn = QPushButton("Open Save Folder")
+        folder_btn = QPushButton("Open Snapshot Folder")
         folder_btn.setFont(QFont("Calibri", 11))
         folder_btn.clicked.connect(
             lambda: QDesktopServices.openUrl(
-                QUrl.fromLocalFile(config.CONFIG_DIR))
+                QUrl.fromLocalFile(config.SNAPSHOT_DIR))
         )
         btn_row.addWidget(reset_btn)
         btn_row.addStretch()
@@ -213,6 +208,92 @@ class ConfigDialog(QDialog):
         lay.addLayout(btn_row)
 
         lay.addStretch()
+        return page
+
+    # ------------------------------------------------------------------ #
+    #  Daily Reset page                                                    #
+    # ------------------------------------------------------------------ #
+
+    def _build_daily_reset_page(self, cfg):
+        page = QWidget()
+        lay = QVBoxLayout(page)
+        lay.setSpacing(12)
+
+        # Collect child widgets/labels for graying out
+        self._dr_child_widgets = []
+        self._dr_child_labels = []
+
+        # Daily Reset toggle (always active — this is the master switch)
+        row = QHBoxLayout()
+        lbl = QLabel("Daily Reset:")
+        daily_reset_tooltip = "When ON, ClientTimer resets all timers to 0 at the scheduled time each day and saves the completed session to the sessions folder. If the app is closed, the reset happens on next launch if the time has already passed."
+        lbl.setFont(QFont("Calibri", 12, QFont.Bold))
+        lbl.setToolTip(daily_reset_tooltip)
+        self._daily_reset = QComboBox()
+        self._daily_reset.addItems(["Off", "On"])
+        self._daily_reset.setCurrentText(
+            "On" if cfg.get("daily_reset_enabled", False) else "Off")
+        self._daily_reset.setMinimumWidth(200)
+        self._daily_reset.setToolTip(daily_reset_tooltip)
+        self._daily_reset.currentTextChanged.connect(
+            self._on_daily_reset_toggle)
+        row.addWidget(lbl)
+        row.addWidget(self._daily_reset)
+        lay.addLayout(row)
+
+        # Separator
+        sep = QFrame()
+        sep.setFrameShape(QFrame.HLine)
+        sep.setFrameShadow(QFrame.Sunken)
+        lay.addWidget(sep)
+
+        # Reset Time (child — grayed when off)
+        row = QHBoxLayout()
+        lbl_time = QLabel("Reset Time:")
+        reset_time_tooltip = "The time of day each that ClientTimer will reset all times and store the previous session as completed."
+        lbl_time.setFont(QFont("Calibri", 12, QFont.Bold))
+        lbl_time.setToolTip(reset_time_tooltip)
+        self._daily_reset_time = QTimeEdit()
+        self._daily_reset_time.setButtonSymbols(QAbstractSpinBox.NoButtons)
+        try:
+            h, m = map(int, cfg.get("daily_reset_time", "00:00").split(":"))
+        except ValueError:
+            h, m = 0, 0
+        self._daily_reset_time.setTime(QTime(h, m))
+        self._daily_reset_time.setDisplayFormat("hh:mm AP")
+        self._daily_reset_time.setToolTip(reset_time_tooltip)
+        row.addWidget(lbl_time)
+        row.addWidget(self._daily_reset_time)
+        lay.addLayout(row)
+
+        self._dr_child_widgets.append(self._daily_reset_time)
+        self._dr_child_labels.append(lbl_time)
+
+        # Separator
+        sep2 = QFrame()
+        sep2.setFrameShape(QFrame.HLine)
+        sep2.setFrameShadow(QFrame.Sunken)
+        lay.addWidget(sep2)
+
+        # Open Sessions Folder button (child — grayed when off)
+        btn_row = QHBoxLayout()
+        btn_row.addStretch()
+        self._sessions_folder_btn = QPushButton("Open Sessions Folder")
+        self._sessions_folder_btn.setFont(QFont("Calibri", 11))
+        self._sessions_folder_btn.clicked.connect(
+            lambda: QDesktopServices.openUrl(
+                QUrl.fromLocalFile(config.COMPLETED_DIR))
+        )
+        btn_row.addWidget(self._sessions_folder_btn)
+        lay.addLayout(btn_row)
+
+        self._dr_child_widgets.append(self._sessions_folder_btn)
+
+        lay.addStretch()
+
+        # Apply initial enabled/grayed state
+        self._on_daily_reset_toggle()
+
         return page
 
     # ------------------------------------------------------------------ #
@@ -227,11 +308,14 @@ class ConfigDialog(QDialog):
         # -- Size --
         row = QHBoxLayout()
         lbl = QLabel("Program Size:")
+        appearance_size_tooltip = "Size of the program."
         lbl.setFont(QFont("Calibri", 12, QFont.Bold))
+        lbl.setToolTip(appearance_size_tooltip)
         self._size = QComboBox()
         self._size.addItems(SIZES)
         self._size.setCurrentText(cfg.get("size", "Regular"))
         self._size.setMinimumWidth(230)
+        self._size.setToolTip(appearance_size_tooltip)
         self._size.currentTextChanged.connect(self._refresh_preview)
         row.addWidget(lbl)
         row.addWidget(self._size)
@@ -240,7 +324,9 @@ class ConfigDialog(QDialog):
         # -- Theme --
         row = QHBoxLayout()
         lbl = QLabel("Program Theme:")
+        appearance_theme_tooltip = "Color scheme of the program."
         lbl.setFont(QFont("Calibri", 12, QFont.Bold))
+        lbl.setToolTip(appearance_theme_tooltip)
         self._theme = QComboBox()
         _base = ["Cupertino Light", "Galaxy Dark"]
         _extra = [t for t in THEMES if t not in _base]
@@ -253,6 +339,7 @@ class ConfigDialog(QDialog):
         self._theme.addItems(_extra)
         self._theme.setCurrentText(cfg.get("theme", "Cupertino Light"))
         self._theme.setMinimumWidth(230)
+        self._theme.setToolTip(appearance_theme_tooltip)
         self._theme.currentTextChanged.connect(self._refresh_preview)
         row.addWidget(lbl)
         row.addWidget(self._theme)
@@ -261,7 +348,9 @@ class ConfigDialog(QDialog):
         # -- Font --
         row = QHBoxLayout()
         lbl = QLabel("Program Font:")
+        appearance_font_tooltip = "Font used by all text in the program."
         lbl.setFont(QFont("Calibri", 12, QFont.Bold))
+        lbl.setToolTip(appearance_font_tooltip)
         self._font = QComboBox()
         for fn in FONTS:
             display = f"{fn} (Default)" if fn == "Calibri" else fn
@@ -270,6 +359,7 @@ class ConfigDialog(QDialog):
         if idx >= 0:
             self._font.setCurrentIndex(idx)
         self._font.setMinimumWidth(230)
+        self._font.setToolTip(appearance_font_tooltip)
         self._font.currentIndexChanged.connect(self._refresh_preview)
         row.addWidget(lbl)
         row.addWidget(self._font)
@@ -278,11 +368,14 @@ class ConfigDialog(QDialog):
         # -- Label Alignment --
         row = QHBoxLayout()
         lbl = QLabel("Label Alignment:")
+        appearance_label_alignment_tooltip = "Which direction to align timer/separator labels to."
         lbl.setFont(QFont("Calibri", 12, QFont.Bold))
+        lbl.setToolTip(appearance_label_alignment_tooltip)
         self._align = QComboBox()
         self._align.addItems(["Left", "Center", "Right"])
         self._align.setCurrentText(cfg.get("label_align", "Left"))
         self._align.setMinimumWidth(230)
+        self._align.setToolTip(appearance_label_alignment_tooltip)
         self._align.currentTextChanged.connect(self._refresh_preview)
         row.addWidget(lbl)
         row.addWidget(self._align)
@@ -291,12 +384,15 @@ class ConfigDialog(QDialog):
         # -- Client Row Separators --
         row = QHBoxLayout()
         lbl = QLabel("Client Separators:")
+        appearance_client_separators_tooltip = "Whether to draw a line between clients in the UI."
         lbl.setFont(QFont("Calibri", 12, QFont.Bold))
+        lbl.setToolTip(appearance_client_separators_tooltip)
         self._sep = QComboBox()
         self._sep.addItems(["No", "Yes"])
         self._sep.setCurrentText(
             "Yes" if cfg.get("client_separators", False) else "No")
         self._sep.setMinimumWidth(230)
+        self._sep.setToolTip(appearance_client_separators_tooltip)
         self._sep.currentTextChanged.connect(self._refresh_preview)
         row.addWidget(lbl)
         row.addWidget(self._sep)
@@ -305,12 +401,15 @@ class ConfigDialog(QDialog):
         # -- Show Group Count --
         row = QHBoxLayout()
         lbl = QLabel("Show Group Count:")
+        appearance_group_count_tooltip = "Whether to show a count of how many timers are nested under a separator."
         lbl.setFont(QFont("Calibri", 12, QFont.Bold))
+        lbl.setToolTip(appearance_group_count_tooltip)
         self._grp_count = QComboBox()
         self._grp_count.addItems(["No", "Yes"])
         self._grp_count.setCurrentText(
             "Yes" if cfg.get("show_group_count", True) else "No")
         self._grp_count.setMinimumWidth(230)
+        self._grp_count.setToolTip(appearance_group_count_tooltip)
         self._grp_count.currentTextChanged.connect(self._refresh_preview)
         row.addWidget(lbl)
         row.addWidget(self._grp_count)
@@ -319,12 +418,15 @@ class ConfigDialog(QDialog):
         # -- Show Group Time --
         row = QHBoxLayout()
         lbl = QLabel("Show Group Time:")
+        appearance_group_time_tooltip = "Whether to show a live sum of all timers nested under a separator."
         lbl.setFont(QFont("Calibri", 12, QFont.Bold))
+        lbl.setToolTip(appearance_group_time_tooltip)
         self._grp_time = QComboBox()
         self._grp_time.addItems(["No", "Yes"])
         self._grp_time.setCurrentText(
             "Yes" if cfg.get("show_group_time", True) else "No")
         self._grp_time.setMinimumWidth(230)
+        self._grp_time.setToolTip(appearance_group_time_tooltip)
         self._grp_time.currentTextChanged.connect(self._refresh_preview)
         row.addWidget(lbl)
         row.addWidget(self._grp_time)
@@ -577,6 +679,7 @@ class ConfigDialog(QDialog):
             self._confirm_delete.currentText() == "Yes")
         self.chosen_confirm_reset = (
             self._confirm_reset.currentText() == "Yes")
+        # Daily Reset
         self.chosen_daily_reset_enabled = (
             self._daily_reset.currentText() == "On")
         t = self._daily_reset_time.time()

@@ -25,26 +25,22 @@ TIERS = [
     4 * 86400,    # ~4 days ago
 ]
 
-
+# Writes a full copy of the state_dict as a snapshot (backupish thing)
 def create_snapshot(state_dict, snapshot_dir, reason, priority="normal"):
-    """Write a full copy of state_dict to a timestamped file.
-
-    Returns the path of the created snapshot.
-    """
     os.makedirs(snapshot_dir, exist_ok=True)
     snap = copy.deepcopy(state_dict)
     snap["meta"]["snapshot_reason"] = reason
     snap["meta"]["snapshot_priority"] = priority
 
-    ts = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
-    path = os.path.join(snapshot_dir, f"state_{ts}.json")
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+    path = os.path.join(snapshot_dir, f"state_{timestamp}.json")
     with open(path, "w", encoding="utf-8") as f:
         json.dump(snap, f, indent=2)
     return path
 
-
+# Extracts and returns the datetime from a given snapshot's filename, such as state_20260212_140311_123456.json ->
+# 2/12/2026, 2:03PM, 11.123456 seconds
 def _parse_snapshot_time(filename):
-    """Extract datetime from a snapshot filename like state_20260212_140311_123456.json."""
     base = os.path.splitext(filename)[0]  # state_20260212_140311_123456
     parts = base.split("_", 1)
     if len(parts) < 2:
