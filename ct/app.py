@@ -755,8 +755,8 @@ class MainWindow(QMainWindow):
             name = next(
                 (r["name"] for r in self.rows if r["rowid"] == rowid), "")
             if QMessageBox.question(
-                self, "Confirm Delete",
-                f"Delete group '{name}'?"
+                    self, "Confirm Delete",
+                    f"Delete group '{name}'?"
             ) != QMessageBox.Yes:
                 return
         self._collapsed_groups.discard(rowid)
@@ -782,8 +782,8 @@ class MainWindow(QMainWindow):
             if self.confirm_reset:
                 name = self.clients[rowid].name
                 if QMessageBox.question(
-                    self, "Confirm Reset",
-                    f"Reset timer '{name}' to zero?"
+                        self, "Confirm Reset",
+                        f"Reset timer '{name}' to zero?"
                 ) != QMessageBox.Yes:
                     return
             self.clients[rowid].stop()
@@ -795,8 +795,8 @@ class MainWindow(QMainWindow):
                 name = next(
                     (r["name"] for r in self.rows if r["rowid"] == rowid), "")
                 if QMessageBox.question(
-                    self, "Confirm Delete",
-                    f"Delete '{name}'?"
+                        self, "Confirm Delete",
+                        f"Delete '{name}'?"
                 ) != QMessageBox.Yes:
                     return
             self.clients[rowid].stop()
@@ -1233,8 +1233,8 @@ class MainWindow(QMainWindow):
         elif action == delete_action:
             if self.confirm_delete:
                 if QMessageBox.question(
-                    self, "Confirm Delete",
-                    f"Delete '{row['name']}'?"
+                        self, "Confirm Delete",
+                        f"Delete '{row['name']}'?"
                 ) != QMessageBox.Yes:
                     return
             if is_timer:
@@ -1351,7 +1351,7 @@ class MainWindow(QMainWindow):
 
     def _reset_all(self):
         if QMessageBox.question(
-            self, "Confirm", "Reset all times to zero?"
+                self, "Confirm", "Reset all times to zero?"
         ) == QMessageBox.Yes:
             self._stop_all()
             for state in self.clients.values():
