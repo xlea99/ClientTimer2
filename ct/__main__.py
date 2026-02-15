@@ -1,7 +1,7 @@
 import sys
 from ct.common.logger import log
 from ct.common.setup import assert_running_from_install_root, PATHS
-from ct.app import main
+from ct.ui.app import main
 
 # Entry point for `python -m ct`
 def run() -> None:
