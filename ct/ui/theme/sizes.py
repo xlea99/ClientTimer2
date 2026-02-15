@@ -1,5 +1,4 @@
-"""Size presets for Client Timer UI elements."""
-
+# Size presets for the UI.
 SIZES = {
     "Microscopic": {
         "label": 9,

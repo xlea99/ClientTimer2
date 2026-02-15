@@ -1,5 +1,4 @@
-"""Theme color palettes for Client Timer."""
-
+# Theme color palettes for the UI.
 THEMES = {
     "Cupertino Light": {
         "text": "#0B0B0B",
