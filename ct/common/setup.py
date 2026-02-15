@@ -39,19 +39,28 @@ class ProjectPaths:
     data: Path
 
     logs: Path
+    current: Path
     snapshots: Path
     sessions: Path
 
     @staticmethod
     def build():
+        appdata = os.getenv("APPDATA")
+        if not appdata:
+            raise RuntimeError("Missing APPDATA environment variable, cannot determine data directories.")
+        localappdata = os.getenv("LOCALAPPDATA")
+        if not localappdata:
+            raise RuntimeError("Missing LOCALAPPDATA environment variable, cannot determine data directories.")
+
         # Folder for the install itself, no user-specific files, just runtime
-        root = ensure_directory(Path(os.environ["LOCALAPPDATA"]) / "ClientTimer2")
+        root = ensure_directory(Path(localappdata) / "Programs" / "ClientTimer2")
 
         # Folder for all clienttimer user-specific and session related stuff
-        data = ensure_directory(Path(os.environ["APPDATA"]) / "ClientTimer2")
+        data = ensure_directory(Path(appdata) / "ClientTimer2")
 
         # Folders within the data folder
         logs = ensure_directory(data / "logs")
+        current = ensure_directory(data / "current")
         snapshots = ensure_directory(data / "snapshots")
         sessions = ensure_directory(data / "completed_sessions")
 
@@ -59,10 +68,8 @@ class ProjectPaths:
             root = root,
             data = data,
             logs = logs,
+            current = current,
             snapshots = snapshots,
             sessions = sessions
         )
 PATHS = ProjectPaths.build()
-
-# Assert runtime location.
-assert_running_from_install_root(PATHS.root / "clienttimer2.exe")

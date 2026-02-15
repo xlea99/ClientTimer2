@@ -32,7 +32,6 @@ def get_logger(
         historical_debugs: int = 10
 ) -> logging.Logger:
     logger = logging.getLogger(name)
-    logger.setLevel(logging.DEBUG)
     logger.propagate = False
 
     log_dir = log_dir or PATHS.logs
