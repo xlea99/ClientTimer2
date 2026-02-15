@@ -1,5 +1,4 @@
-"""Available font families for Client Timer."""
-
+# All available font families for the UI
 FONTS = [
     "Arial",
     "Calibri",

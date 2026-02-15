@@ -1,8 +1,6 @@
-"""Qt stylesheet generators for Client Timer themes."""
-
 from .colors import THEMES
 
-
+# Stylesheet generator for main windows.
 def build_stylesheet(theme_name):
     """Build a Qt stylesheet string from a theme name."""
     t = THEMES.get(theme_name, THEMES["Cupertino Light"])
@@ -62,7 +60,7 @@ def build_stylesheet(theme_name):
         f"}}"
     )
 
-
+# Stylesheet generator for context menus.
 def build_menu_stylesheet(theme_name):
     """Build a Qt stylesheet for context menus."""
     t = THEMES.get(theme_name, THEMES["Cupertino Light"])
