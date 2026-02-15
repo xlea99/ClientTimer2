@@ -3,6 +3,7 @@
 THEMES = {
     "Cupertino Light": {
         "text": "#0B0B0B",
+        "text_grayed_out": "#A0A0A0",
         "button_text": "#0B0B0B",
         "bg": "#F0F0F5",
         "button_bg": "#FDFDFD",
@@ -18,6 +19,7 @@ THEMES = {
     },
     "Galaxy Dark": {
         "text": "#E1E7EC",
+        "text_grayed_out": "#555F6A",
         "button_text": "#E1E7EC",
         "bg": "#010101",
         "button_bg": "#151C21",
@@ -33,6 +35,7 @@ THEMES = {
     },
     "A Way": {
         "text": "#FDF7D1",
+        "text_grayed_out": "#706D4A",
         "button_text": "#111111",
         "bg": "#292929",
         "button_bg": "#E8B20F",
@@ -48,6 +51,7 @@ THEMES = {
     },
     "Black Herizons": {
         "text": "#EE0000",
+        "text_grayed_out": "#666666",
         "button_text": "#000000",
         "bg": "#000000",
         "button_bg": "#FFFFFF",
@@ -63,6 +67,7 @@ THEMES = {
     },
     "Cimply Premier": {
         "text": "#333333",
+        "text_grayed_out": "#999999",
         "button_text": "#023F71",
         "bg": "#E8EEF2",
         "button_bg": "#FDFDFD",
@@ -78,6 +83,7 @@ THEMES = {
     },
     "Dialpad At Dusk": {
         "text": "#FFF7FB",
+        "text_grayed_out": "#6B5A75",
         "button_text": "#FFF7FB",
         "bg": "#231735",            # deep, quiet purple
         "button_bg": "#B025A0",     # mid purple
@@ -93,6 +99,7 @@ THEMES = {
     },
     "Gray Until Further Notice": {
         "text": "#1A1A1A",
+        "text_grayed_out": "#909090",
         "button_text": "#1A1A1A",
         "bg": "#D8D8D8",
         "button_bg": "#C8C8C8",
@@ -108,6 +115,7 @@ THEMES = {
     },
     "ICOMM Blues": {
         "text": "#FDFDFD",
+        "text_grayed_out": "#5A6888",
         "button_text": "#191C22",
         "bg": "#052455",
         "button_bg": "#A7CDFD",
@@ -123,6 +131,7 @@ THEMES = {
     },
     "Manila Memories": {
         "text": "#241E19",
+        "text_grayed_out": "#A09585",
         "button_text": "#241E19",
         "bg": "#E2D6C2",           # slightly more manila paper
         "button_bg": "#D2C2A8",    # manila-tinted controls
@@ -138,6 +147,7 @@ THEMES = {
     },
     "Park In The Forest": {
         "text": "#0C130D",
+        "text_grayed_out": "#8A9A88",
         "button_text": "#0C130D",
         "bg": "#E9F2E6",          # a bit deeper / greener than before
         "button_bg": "#C9E0C5",   # darker, more "leafy"
@@ -153,6 +163,7 @@ THEMES = {
     },
     "T-Magentle": {
         "text": "#E20074",
+        "text_grayed_out": "#AAAAAA",
         "button_text": "#262626",
         "bg": "#FFFFFF",
         "button_bg": "#E8E8E8",
