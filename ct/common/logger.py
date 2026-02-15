@@ -1,11 +1,10 @@
 import logging
 from pathlib import Path
 from logging.handlers import RotatingFileHandler
-from shaman3.common.paths import PATHS
+from ct.common.setup import PATHS
 from datetime import datetime
 
 # Set up the special "test" log level for specific testing.
-
 TEST_LOG_LEVEL = 25
 def ensure_test_level():
     # Register the level name if it isn't already mapped to "TEST"
@@ -17,14 +16,13 @@ def ensure_test_level():
             if self.isEnabledFor(TEST_LOG_LEVEL):
                 self._log(TEST_LOG_LEVEL, msg, args, **kwargs)
         logging.Logger.test = test
-
 ensure_test_level()
 
 LOG_FORMAT = "%(asctime)s %(levelname)s [%(name)s:%(filename)s:%(lineno)d] %(message)s"
 LOG_DATE_FORMAT = "%Y-%m-%d %H:%M:%S"
 
 def get_logger(
-        name = "shaman3",
+        name = "clienttimer2",
         level = logging.INFO,
         log_dir: Path | None = None,
         max_bytes = 5 * 1024 * 1024,
@@ -42,7 +40,6 @@ def get_logger(
     log_file_path = log_dir / f"{name}.log"
 
     fmt = logging.Formatter(LOG_FORMAT,LOG_DATE_FORMAT)
-
 
     # Setup persistent handler
     persistent_handler_name = f"{name}:persistent"
