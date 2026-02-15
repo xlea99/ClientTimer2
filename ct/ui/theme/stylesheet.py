@@ -1,0 +1,77 @@
+"""Qt stylesheet generators for Client Timer themes."""
+
+from .colors import THEMES
+
+
+def build_stylesheet(theme_name):
+    """Build a Qt stylesheet string from a theme name."""
+    t = THEMES.get(theme_name, THEMES["Cupertino Light"])
+    return (
+        f"QMainWindow, QDialog, QWidget {{ background-color: {t['bg']}; }}"
+        f"QLabel {{ color: {t['text']}; background: transparent; }}"
+        f"QPushButton {{"
+        f"  color: {t['button_text']};"
+        f"  background-color: {t['button_bg']};"
+        f"  border: {t['border']}px solid rgba(128,128,128,0.4);"
+        f"  padding: 4px 8px;"
+        f"}}"
+        f"QPushButton:hover, QPushButton:pressed {{"
+        f"  background-color: {t['button_active']};"
+        f"}}"
+        f"QLineEdit {{"
+        f"  color: {t['button_text']};"
+        f"  background-color: {t['button_bg']};"
+        f"  border: {t['border']}px solid rgba(128,128,128,0.4);"
+        f"  padding: 3px 5px;"
+        f"}}"
+        f"QComboBox {{"
+        f"  color: {t['button_text']};"
+        f"  background-color: {t['button_bg']};"
+        f"  border: {t['border']}px solid rgba(128,128,128,0.4);"
+        f"  padding: 3px 5px;"
+        f"}}"
+        f"QComboBox QAbstractItemView {{"
+        f"  color: {t['button_text']};"
+        f"  background-color: {t['button_bg']};"
+        f"  selection-background-color: {t['button_active']};"
+        f"}}"
+        f"QSpinBox, QTimeEdit {{"
+        f"  color: {t['button_text']};"
+        f"  background-color: {t['button_bg']};"
+        f"  border: {t['border']}px solid rgba(128,128,128,0.4);"
+        f"  padding: 3px 5px;"
+        f"}}"
+        f"QListWidget {{"
+        f"  background-color: {t['button_bg']};"
+        f"  border: 1px solid rgba(128,128,128,0.4);"
+        f"  outline: none;"
+        f"}}"
+        f"QListWidget::item {{"
+        f"  color: {t['button_text']};"
+        f"  padding: 8px 12px;"
+        f"}}"
+        f"QListWidget::item:selected {{"
+        f"  background-color: {t['button_active']};"
+        f"  color: {t['button_text']};"
+        f"}}"
+        f"QToolTip {{"
+        f"  background-color: {t['bg']};"
+        f"  color: {t['text']};"
+        f"  border: 1px solid {t['separator']};"
+        f"  padding: 4px 8px;"
+        f"}}"
+    )
+
+
+def build_menu_stylesheet(theme_name):
+    """Build a Qt stylesheet for context menus."""
+    t = THEMES.get(theme_name, THEMES["Cupertino Light"])
+    return (
+        f"QMenu {{ background-color: {t['button_bg']}; color: {t['button_text']};"
+        f"  border: 1px solid rgba(128,128,128,0.4); }}"
+        f"QMenu::item {{ padding: 4px 20px; }}"
+        f"QMenu::item:selected {{ background-color: {t['button_active']};"
+        f"  color: {t['button_text']}; }}"
+        f"QMenu::separator {{ height: 1px; background: rgba(128,128,128,0.4);"
+        f"  margin: 4px 0px; }}"
+    )

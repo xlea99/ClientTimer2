@@ -1,4 +1,4 @@
-"""Theme and size definitions for Client Timer."""
+"""Theme color palettes for Client Timer."""
 
 THEMES = {
     "Cupertino Light": {
@@ -85,16 +85,16 @@ THEMES = {
         "text": "#FFF7FB",
         "text_grayed_out": "#6B5A75",
         "button_text": "#FFF7FB",
-        "bg": "#231735",            # deep, quiet purple
-        "button_bg": "#B025A0",     # mid purple
-        "button_active": "#EB2F6C", # warm sunset orange
+        "bg": "#231735",
+        "button_bg": "#B025A0",
+        "button_active": "#EB2F6C",
         "border": 0,
         "row_dragged": "#54446A",
         "separator": "#4A395E",
         "row_separator": "#332543",
         "group_header_bg": "#1A1028",
         "group_header_text": "#FFF7FB",
-        "running_text": "#FA593B",        # softer version of button_active
+        "running_text": "#FA593B",
         "group_running_text": "#FA593B",
     },
     "Gray Until Further Notice": {
@@ -133,9 +133,9 @@ THEMES = {
         "text": "#241E19",
         "text_grayed_out": "#A09585",
         "button_text": "#241E19",
-        "bg": "#E2D6C2",           # slightly more manila paper
-        "button_bg": "#D2C2A8",    # manila-tinted controls
-        "button_active": "#BFA680",# warm folder-tab highlight (still muted)
+        "bg": "#E2D6C2",
+        "button_bg": "#D2C2A8",
+        "button_active": "#BFA680",
         "border": 0,
         "row_dragged": "#FFF3DD",
         "separator": "#BDAF9A",
@@ -149,16 +149,16 @@ THEMES = {
         "text": "#0C130D",
         "text_grayed_out": "#8A9A88",
         "button_text": "#0C130D",
-        "bg": "#E9F2E6",          # a bit deeper / greener than before
-        "button_bg": "#C9E0C5",   # darker, more "leafy"
-        "button_active": "#7EC67C",  # still bright grass, slightly richer
+        "bg": "#E9F2E6",
+        "button_bg": "#C9E0C5",
+        "button_active": "#7EC67C",
         "border": 0,
-        "row_dragged": "#B7D4B3",     # more "shadowed" grass
-        "separator": "#A9BFA6",       # darker, tree-bark-ish divider
+        "row_dragged": "#B7D4B3",
+        "separator": "#A9BFA6",
         "row_separator": "#D6E4D3",
-        "group_header_bg": "#D2E3CD", # like standing under a tree shade
+        "group_header_bg": "#D2E3CD",
         "group_header_text": "#24472D",
-        "running_text": "#2E7C35",    # warm, foresty green
+        "running_text": "#2E7C35",
         "group_running_text": "#205627",
     },
     "T-Magentle": {
@@ -176,87 +176,5 @@ THEMES = {
         "group_header_text": "#F2F2F2",
         "running_text": "#790041",
         "group_running_text": "#FFFFFF",
-    }
-}
-
-FONTS = [
-    "Arial",
-    "Calibri",
-    "Cambria",
-    "Comic Sans MS",
-    "Consolas",
-    "Courier New",
-    "Georgia",
-    "Helvetica",
-    "Segoe UI",
-    "Tahoma",
-    "Times New Roman",
-    "Trebuchet MS",
-    "Verdana",
-]
-
-SIZES = {
-    "Microscopic": {
-        "label": 9,
-        "time": 7,
-        "action": 6,
-        "padding": 0,
-        "frame_pad": 0,
-        "h_spacing": 1,
-        "v_spacing": 1,
-    },
-    "Tiny": {
-        "label": 10,
-        "time": 8,
-        "action": 7,
-        "padding": 1,
-        "frame_pad": 0,
-        "h_spacing": 3,
-        "v_spacing": 2,
-    },
-    "Compact": {
-        "label": 12,
-        "time": 10,
-        "action": 8,
-        "padding": 2,
-        "frame_pad": 3,
-        "h_spacing": 4,
-        "v_spacing": 3,
-    },
-    "Regular": {
-        "label": 14,
-        "time": 12,
-        "action": 9,
-        "padding": 5,
-        "frame_pad": 5,
-        "h_spacing": 6,
-        "v_spacing": 4,
-    },
-    "Bulky": {
-        "label": 16,
-        "time": 14,
-        "action": 11,
-        "padding": 5,
-        "frame_pad": 5,
-        "h_spacing": 7,
-        "v_spacing": 5,
-    },
-    "Colossal": {
-        "label": 18,
-        "time": 16,
-        "action": 13,
-        "padding": 7,
-        "frame_pad": 7,
-        "h_spacing": 8,
-        "v_spacing": 6,
-    },
-    "Gargantuan": {
-        "label": 22,
-        "time": 20,
-        "action": 18,
-        "padding": 9,
-        "frame_pad": 9,
-        "h_spacing": 10,
-        "v_spacing": 7,
     },
 }

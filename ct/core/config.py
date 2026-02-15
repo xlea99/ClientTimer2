@@ -4,22 +4,21 @@ Replaces the old split-brain approach (config.json + recent_save.json).
 Migration from old format happens automatically on first load.
 """
 
+import copy
 import json
 import os
 from datetime import date, datetime, timezone
 
+from ct.common.setup import PATHS
 
-CONFIG_DIR = os.path.join(
-    os.getenv("APPDATA") or os.path.expanduser("~"),
-    "ICOMM Client Timer",
-)
-STATE_PATH = os.path.join(CONFIG_DIR, "state.json")
-SNAPSHOT_DIR = os.path.join(CONFIG_DIR, "snapshots")
-COMPLETED_DIR = os.path.join(CONFIG_DIR, "completed_sessions")
+STATE_PATH = PATHS.current / "state.json"
+SNAPSHOT_DIR = PATHS.snapshots
+COMPLETED_DIR = PATHS.sessions
 
 # Old paths — used only for migration detection
-_OLD_CONFIG_PATH = os.path.join(CONFIG_DIR, "config.json")
-_OLD_SAVE_PATH = os.path.join(CONFIG_DIR, "recent_save.json")
+_OLD_DATA_DIR = PATHS.data.parent / "ICOMM Client Timer"
+_OLD_CONFIG_PATH = _OLD_DATA_DIR / "config.json"
+_OLD_SAVE_PATH = _OLD_DATA_DIR / "recent_save.json"
 
 _SETTINGS_DEFAULTS = {
     "theme": "Cupertino Light",
@@ -36,12 +35,6 @@ _SETTINGS_DEFAULTS = {
     "daily_reset_time": "00:00",
     "snapshot_min_minutes": 5,
 }
-
-
-def _ensure_dirs():
-    os.makedirs(CONFIG_DIR, exist_ok=True)
-    os.makedirs(SNAPSHOT_DIR, exist_ok=True)
-    os.makedirs(COMPLETED_DIR, exist_ok=True)
 
 
 def now_iso():
@@ -75,7 +68,6 @@ def load_state():
     If state.json doesn't exist, attempts migration from old config.json
     and recent_save.json.  If neither exists, returns a fresh default state.
     """
-    _ensure_dirs()
     try:
         with open(STATE_PATH, "r", encoding="utf-8") as f:
             state = json.load(f)
@@ -105,7 +97,6 @@ def load_state():
 
 def save_state(state):
     """Write state to disk, updating the saved_at timestamp."""
-    _ensure_dirs()
     state["meta"]["saved_at"] = now_iso()
     with open(STATE_PATH, "w", encoding="utf-8") as f:
         json.dump(state, f, indent=2)
@@ -118,18 +109,17 @@ def save_completed_session(state_dict, boundary_dt):
     and writes it as a timestamped file.  The result is a fully self-contained
     state file that could be restored on its own.
     """
-    import copy
-    _ensure_dirs()
     completed = copy.deepcopy(state_dict)
     completed["meta"]["is_completed_session"] = True
     completed["meta"]["saved_at"] = now_iso()
     completed["session"]["end"] = boundary_dt.isoformat()
 
+    os.makedirs(COMPLETED_DIR, exist_ok=True)
     ts = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
-    path = os.path.join(COMPLETED_DIR, f"session_{ts}.json")
+    path = COMPLETED_DIR / f"session_{ts}.json"
     with open(path, "w", encoding="utf-8") as f:
         json.dump(completed, f, indent=2)
-    return path
+    return str(path)
 
 
 # ---------------------------------------------------------------------------

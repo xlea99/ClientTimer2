@@ -18,8 +18,8 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from ct import config
-from ct.themes import THEMES, SIZES, FONTS
+from ct.common.setup import PATHS
+from ct.ui.theme import THEMES, SIZES, FONTS
 
 
 class ConfigDialog(QDialog):
@@ -200,7 +200,7 @@ class ConfigDialog(QDialog):
         folder_btn.setFont(QFont("Calibri", 11))
         folder_btn.clicked.connect(
             lambda: QDesktopServices.openUrl(
-                QUrl.fromLocalFile(config.SNAPSHOT_DIR))
+                QUrl.fromLocalFile(str(PATHS.snapshots)))
         )
         btn_row.addWidget(reset_btn)
         btn_row.addStretch()
@@ -282,7 +282,7 @@ class ConfigDialog(QDialog):
         self._sessions_folder_btn.setFont(QFont("Calibri", 11))
         self._sessions_folder_btn.clicked.connect(
             lambda: QDesktopServices.openUrl(
-                QUrl.fromLocalFile(config.COMPLETED_DIR))
+                QUrl.fromLocalFile(str(PATHS.sessions)))
         )
         btn_row.addWidget(self._sessions_folder_btn)
         lay.addLayout(btn_row)
