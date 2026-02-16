@@ -33,6 +33,7 @@ def get_logger(
 ) -> logging.Logger:
     logger = logging.getLogger(name)
     logger.propagate = False
+    logger.setLevel(level)
 
     log_dir = log_dir or PATHS.logs
     log_dir.mkdir(parents=True,exist_ok=True)

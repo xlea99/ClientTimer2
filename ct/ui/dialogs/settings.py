@@ -17,13 +17,12 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
-
 from ct.common.setup import PATHS
 from ct.ui.theme import THEMES, SIZES, FONTS
 
-
+# Simple tabbed settings dialog with a left sidebar for different categories. Opens when the user clicks the little
+# gear icon in main app
 class ConfigDialog(QDialog):
-    """Tabbed settings dialog with left sidebar navigation."""
 
     def __init__(self, parent, cfg, on_reset):
         super().__init__(parent)

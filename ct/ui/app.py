@@ -1,12 +1,9 @@
-"""Main application module — MainWindow and timer logic."""
-
 import ctypes
 import re
 import sys
 from datetime import datetime, timedelta
-
 from PySide6.QtCore import Qt, QEvent, QTimer
-from PySide6.QtGui import QColor, QFont, QFontDatabase, QIcon, QPixmap
+from PySide6.QtGui import QColor, QFont, QFontDatabase, QIcon
 from PySide6.QtWidgets import (
     QApplication,
     QColorDialog,
@@ -20,7 +17,7 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
-
+from ct.common.setup import PATHS
 from ct.core import config
 from ct.core.snapshot import create_snapshot, prune_snapshots, SnapshotScheduler
 from ct.core.state import ClientState
@@ -36,16 +33,14 @@ _SANITIZE = re.compile(r"[^a-zA-Z0-9\s'.]+")
 # Main window
 # ---------------------------------------------------------------------------
 
+# Main window of the actual clienttimer2 application. What displays timers, separators, etc
 class MainWindow(QMainWindow):
 
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("Client Timer")
-
-        # Transparent 1x1 icon — prevents ugly default exe icon on title bar
-        _blank = QPixmap(1, 1)
-        _blank.fill(Qt.transparent)
-        self.setWindowIcon(QIcon(_blank))
+        self.setWindowTitle("Client Timer 2")
+        icon = QIcon(str(PATHS.assets / "icon.ico"))
+        self.setWindowIcon(icon)
 
         # -- Load unified state --
         state = config.load_state()

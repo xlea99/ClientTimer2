@@ -37,6 +37,8 @@ class ProjectPaths:
 
     root: Path
     data: Path
+    assets: Path
+    old: Path
 
     logs: Path
     current: Path
@@ -53,10 +55,20 @@ class ProjectPaths:
             raise RuntimeError("Missing LOCALAPPDATA environment variable, cannot determine data directories.")
 
         # Folder for the install itself, no user-specific files, just runtime
-        root = ensure_directory(Path(localappdata) / "Programs" / "ClientTimer2")
+        if getattr(sys, "frozen", False):
+            root = ensure_directory(Path(localappdata) / "Programs" / "ClientTimer2", must_exist=True)
+        # For when we're running this nonfrozen in intellichad
+        else:
+            root = Path(__file__).resolve().parents[2]
+
+        # Folder for runtime assets, should be root/assets
+        assets = ensure_directory(root / "assets",must_exist=True)
 
         # Folder for all clienttimer user-specific and session related stuff
         data = ensure_directory(Path(appdata) / "ClientTimer2")
+
+        # The path to the Old ClientTimer1 folder may or may not exist, so we don't enforce it.
+        old = Path(Path(appdata) / "ICOMM Client Timer")
 
         # Folders within the data folder
         logs = ensure_directory(data / "logs")
@@ -67,6 +79,8 @@ class ProjectPaths:
         return ProjectPaths(
             root = root,
             data = data,
+            assets = assets,
+            old = old,
             logs = logs,
             current = current,
             snapshots = snapshots,
