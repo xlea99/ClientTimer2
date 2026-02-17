@@ -21,7 +21,7 @@ from PySide6.QtWidgets import (
 from ct.common.setup import PATHS
 from ct.core import config
 from ct.core.snapshot import create_snapshot, prune_snapshots
-from ct.core.state import ClientState
+from ct.core.timer_state import TimerState
 from ct.ui.dialogs import ConfigDialog
 from ct.ui.drag import DragController
 from ct.ui.theme import THEMES, SIZES, build_stylesheet, build_menu_stylesheet
@@ -74,12 +74,12 @@ class MainWindow(QMainWindow):
         self._session_start = datetime.fromisoformat(session["start"])
         tracked = session.get("tracked_times", {})
 
-        self.clients = {}  # rowid -> ClientState (timers only)
+        self.timers = {}  # rowid -> TimerState (timers only)
         for row in self.rows:
             if row["type"] == "timer":
                 rid = row["rowid"]
                 tt = tracked.get(str(rid), {})
-                self.clients[rid] = ClientState(
+                self.timers[rid] = TimerState(
                     row["name"],
                     elapsed=tt.get("elapsed", 0.0),
                     running_since=tt.get("running_since"),
@@ -165,8 +165,8 @@ class MainWindow(QMainWindow):
         """Sum of floored current_elapsed for all children of a separator."""
         total = 0
         for child_rid in self._group_children(group_rowid):
-            if child_rid in self.clients:
-                total += int(self.clients[child_rid].current_elapsed)
+            if child_rid in self.timers:
+                total += int(self.timers[child_rid].current_elapsed)
         return total
 
     def _parent_group(self, rowid):
@@ -260,7 +260,7 @@ class MainWindow(QMainWindow):
                     else:
                         children = self._group_children(rid)
                     has_running = any(
-                        cid in self.clients and self.clients[cid].running
+                        cid in self.timers and self.timers[cid].running
                         for cid in children)
                     total = self._group_total_time(rid)
 
@@ -273,7 +273,7 @@ class MainWindow(QMainWindow):
                         on_remove=self._on_remove_group,
                     )
                 else:
-                    state = self.clients[rid]
+                    state = self.timers[rid]
                     rc, wd = build_timer_row(
                         ctx, rid, row, state, is_child, row_bg,
                         border_css, self._shift_held, self.label_align,
@@ -412,7 +412,7 @@ class MainWindow(QMainWindow):
 
     def _on_adjust(self, rowid, direction):
         minutes = 1 if (QApplication.keyboardModifiers() & Qt.ShiftModifier) else 5
-        self.clients[rowid].adjust(direction * minutes * 60)
+        self.timers[rowid].adjust(direction * minutes * 60)
         self._update_display(rowid)
         self._save_state()
 
@@ -424,7 +424,7 @@ class MainWindow(QMainWindow):
         rid = self._next_rowid
         self._next_rowid += 1
         self.rows.append({"rowid": rid, "name": name, "type": "timer", "bg": None})
-        self.clients[rid] = ClientState(name)
+        self.timers[rid] = TimerState(name)
         self._save_state()
         self._try_snapshot(reason="layout_change",priority="medium")
         self._rebuild_rows()
@@ -469,14 +469,14 @@ class MainWindow(QMainWindow):
     def _on_remove(self, rowid):
         if QApplication.keyboardModifiers() & Qt.ShiftModifier:
             if self.confirm_reset:
-                name = self.clients[rowid].name
+                name = self.timers[rowid].name
                 if QMessageBox.question(
                         self, "Confirm Reset",
                         f"Reset timer '{name}' to zero?"
                 ) != QMessageBox.Yes:
                     return
-            self.clients[rowid].stop()
-            self.clients[rowid].reset()
+            self.timers[rowid].stop()
+            self.timers[rowid].reset()
             self._set_bold(rowid, False)
             self._update_display(rowid)
         else:
@@ -488,8 +488,8 @@ class MainWindow(QMainWindow):
                         f"Delete '{name}'?"
                 ) != QMessageBox.Yes:
                     return
-            self.clients[rowid].stop()
-            del self.clients[rowid]
+            self.timers[rowid].stop()
+            del self.timers[rowid]
             self.rows = [r for r in self.rows if r["rowid"] != rowid]
             self._save_state()
             self._try_snapshot(reason="layout_change",priority="medium")
@@ -540,8 +540,8 @@ class MainWindow(QMainWindow):
                 new_name = _SANITIZE.sub("", text).strip()
                 if new_name:
                     row["name"] = new_name
-                    if is_timer and rowid in self.clients:
-                        self.clients[rowid].name = new_name
+                    if is_timer and rowid in self.timers:
+                        self.timers[rowid].name = new_name
                     self._save_state()
                     self._try_snapshot(reason="layout_change",priority="medium")
                     self._rebuild_rows()
@@ -571,13 +571,13 @@ class MainWindow(QMainWindow):
             self._try_snapshot(reason="layout_change",priority="medium")
             self._rebuild_rows()
         elif is_timer and action == set_time:
-            current = _format_time(self.clients[rowid].current_elapsed)
+            current = _format_time(self.timers[rowid].current_elapsed)
             text, ok = QInputDialog.getText(
                 self, "Set Time", "Enter time (HH:MM:SS):", text=current)
             if ok and text.strip():
                 secs = self._parse_time_input(text.strip())
                 if secs is not None:
-                    state = self.clients[rowid]
+                    state = self.timers[rowid]
                     was_running = state.running
                     if was_running:
                         state.stop()
@@ -597,8 +597,8 @@ class MainWindow(QMainWindow):
                 ) != QMessageBox.Yes:
                     return
             if is_timer:
-                self.clients[rowid].stop()
-                del self.clients[rowid]
+                self.timers[rowid].stop()
+                del self.timers[rowid]
             else:
                 self._collapsed_groups.discard(rowid)
             self.rows = [r for r in self.rows if r["rowid"] != rowid]
@@ -687,18 +687,18 @@ class MainWindow(QMainWindow):
         self._start_additional(rowid)
 
     def _start_additional(self, rowid):
-        self.clients[rowid].start()
+        self.timers[rowid].start()
         self._set_bold(rowid, True)
 
     def _stop_all(self):
-        for rid, state in self.clients.items():
+        for rid, state in self.timers.items():
             if state.running:
                 state.stop()
                 self._set_bold(rid, False)
                 self._update_display(rid)
 
     def _stop_one(self, rowid):
-        state = self.clients[rowid]
+        state = self.timers[rowid]
         if state.running:
             state.stop()
             self._set_bold(rowid, False)
@@ -709,7 +709,7 @@ class MainWindow(QMainWindow):
                 self, "Confirm", "Reset all times to zero?"
         ) == QMessageBox.Yes:
             self._stop_all()
-            for state in self.clients.values():
+            for state in self.timers.values():
                 state.reset()
             self._update_all_displays()
 
@@ -749,9 +749,9 @@ class MainWindow(QMainWindow):
             return
 
         has_running = any(
-            self.clients[cid].running
+            self.timers[cid].running
             for cid in self._group_children(group_rowid)
-            if cid in self.clients
+            if cid in self.timers
         )
 
         t = THEMES.get(self.theme, THEMES["Cupertino Light"])
@@ -770,11 +770,11 @@ class MainWindow(QMainWindow):
     def _update_display(self, rowid):
         if rowid in self._widgets:
             self._widgets[rowid]["time"].setText(
-                _format_time(self.clients[rowid].current_elapsed)
+                _format_time(self.timers[rowid].current_elapsed)
             )
 
     def _update_all_displays(self):
-        for rid in self.clients:
+        for rid in self.timers:
             self._update_display(rid)
 
     def _sync_footer_heights(self):
@@ -792,7 +792,7 @@ class MainWindow(QMainWindow):
 
     def _tick(self):
         any_running = False
-        for rid, state in self.clients.items():
+        for rid, state in self.timers.items():
             if state.running:
                 any_running = True
                 self._update_display(rid)
@@ -822,7 +822,7 @@ class MainWindow(QMainWindow):
 
     def _build_state_dict(self):
         tracked = {}
-        for rid, st in self.clients.items():
+        for rid, st in self.timers.items():
             st.freeze()
             entry = {"elapsed": st.elapsed}
             if st.running and st.started_at:
@@ -903,7 +903,7 @@ class MainWindow(QMainWindow):
         config.save_completed_session(state, boundary_dt)
 
         self._stop_all()
-        for st in self.clients.values():
+        for st in self.timers.values():
             st.reset()
         self._update_all_displays()
 
