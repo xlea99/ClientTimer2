@@ -38,11 +38,12 @@ class TimerState:
             log.debug(f"Started timer '{self.name}' at mono {self._mono}")
     def stop(self):
         if self.running:
+            now = time.monotonic()
             self.elapsed += time.monotonic() - self._mono
             self.running = False
-            log.debug(f"Stopped timer '{self.name}' at mono {self._mono}")
             self._mono = None
             self.started_at = None
+            log.debug(f"Stopped timer '{self.name}' at mono {now}")
     # Simply restores the timer to 0:00
     def reset(self):
         self.running = False
