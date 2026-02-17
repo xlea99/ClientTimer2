@@ -1,11 +1,9 @@
 from datetime import datetime
 
 
-
 # Simply returns the current local time as an ISO8601 string with timezone offset.
 def now_iso():
     return datetime.now().astimezone().isoformat()
-
 
 # Given a path to an old ClientTimer1 config.txt, this extracts a dict of settings.
 def read_old_config(old_config_path):
