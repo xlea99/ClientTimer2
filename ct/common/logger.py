@@ -91,5 +91,5 @@ def get_logger(
 
     return logger
 
-log = get_logger(level=logging.INFO,console=False,historical_debugs=10)
+log = get_logger(level=logging.DEBUG,console=False,historical_debugs=10)
 log.info("=== INITIALIZED NEW SESSION ===")
