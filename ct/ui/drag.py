@@ -82,7 +82,7 @@ class DragController:
                             break
 
         h._save_state()
-        h._snapshot_scheduler.request("layout_change")
+        h._try_snapshot(reason="layout_change",priority="medium")
         QApplication.restoreOverrideCursor()
         QApplication.instance().removeEventFilter(h)
         h.setMinimumSize(0, 0)
