@@ -4,20 +4,6 @@ from logging.handlers import RotatingFileHandler
 from ct.common.setup import PATHS
 from datetime import datetime
 
-# Set up the special "test" log level for specific testing.
-TEST_LOG_LEVEL = 25
-def ensure_test_level():
-    # Register the level name if it isn't already mapped to "TEST"
-    if logging.getLevelName(TEST_LOG_LEVEL) != "TEST":
-        logging.addLevelName(TEST_LOG_LEVEL, "TEST")
-    # Only attach the method once
-    if not hasattr(logging.Logger, "test"):
-        def test(self, msg, *args, **kwargs):
-            if self.isEnabledFor(TEST_LOG_LEVEL):
-                self._log(TEST_LOG_LEVEL, msg, args, **kwargs)
-        logging.Logger.test = test
-ensure_test_level()
-
 LOG_FORMAT = "%(asctime)s %(levelname)s [%(name)s:%(filename)s:%(lineno)d] %(message)s"
 LOG_DATE_FORMAT = "%Y-%m-%d %H:%M:%S"
 

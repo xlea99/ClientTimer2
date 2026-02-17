@@ -1,6 +1,7 @@
 import ctypes
 import re
 import sys
+import time
 from datetime import datetime, timedelta
 from PySide6.QtCore import Qt, QEvent, QTimer
 from PySide6.QtGui import QColor, QFont, QFontDatabase, QIcon
@@ -19,7 +20,7 @@ from PySide6.QtWidgets import (
 )
 from ct.common.setup import PATHS
 from ct.core import config
-from ct.core.snapshot import create_snapshot, prune_snapshots, SnapshotScheduler
+from ct.core.snapshot import create_snapshot, prune_snapshots
 from ct.core.state import ClientState
 from ct.ui.dialogs import ConfigDialog
 from ct.ui.drag import DragController
@@ -93,10 +94,10 @@ class MainWindow(QMainWindow):
         # -- Drag controller --
         self._drag = DragController(self)
 
-        # -- Snapshot scheduler --
-        self._snapshot_scheduler = SnapshotScheduler(
-            min_interval=self.snapshot_min_minutes * 60,
-        )
+        # -- Snapshot handling --
+        self._last_snapshot_time = 0.0
+        # Ensure snapshots happen at least this many seconds apart, unless high priority.
+        self._snapshot_debounce = 10.0
 
         # -- Check for missed daily reset at startup --
         if self.daily_reset_enabled:
@@ -414,7 +415,6 @@ class MainWindow(QMainWindow):
         self.clients[rowid].adjust(direction * minutes * 60)
         self._update_display(rowid)
         self._save_state()
-        self._snapshot_scheduler.request("timer_adjustment")
 
     def _on_add(self):
         raw = self._add_input.text().strip()
@@ -426,7 +426,7 @@ class MainWindow(QMainWindow):
         self.rows.append({"rowid": rid, "name": name, "type": "timer", "bg": None})
         self.clients[rid] = ClientState(name)
         self._save_state()
-        self._snapshot_scheduler.request("layout_change")
+        self._try_snapshot(reason="layout_change",priority="medium")
         self._rebuild_rows()
 
     def _on_add_group(self):
@@ -438,7 +438,7 @@ class MainWindow(QMainWindow):
         self._next_rowid += 1
         self.rows.append({"rowid": rid, "name": name, "type": "separator", "bg": None})
         self._save_state()
-        self._snapshot_scheduler.request("layout_change")
+        self._try_snapshot(reason="layout_change",priority="medium")
         self._rebuild_rows()
 
     def _on_remove_group(self, rowid):
@@ -453,7 +453,7 @@ class MainWindow(QMainWindow):
         self._collapsed_groups.discard(rowid)
         self.rows = [r for r in self.rows if r["rowid"] != rowid]
         self._save_state()
-        self._snapshot_scheduler.request("layout_change")
+        self._try_snapshot(reason="layout_change",priority="medium")
         self._rebuild_rows()
         QTimer.singleShot(0, self.adjustSize)
 
@@ -492,7 +492,7 @@ class MainWindow(QMainWindow):
             del self.clients[rowid]
             self.rows = [r for r in self.rows if r["rowid"] != rowid]
             self._save_state()
-            self._snapshot_scheduler.request("layout_change")
+            self._try_snapshot(reason="layout_change",priority="medium")
             self._rebuild_rows()
             QTimer.singleShot(0, self.adjustSize)
 
@@ -543,7 +543,7 @@ class MainWindow(QMainWindow):
                     if is_timer and rowid in self.clients:
                         self.clients[rowid].name = new_name
                     self._save_state()
-                    self._snapshot_scheduler.request("layout_change")
+                    self._try_snapshot(reason="layout_change",priority="medium")
                     self._rebuild_rows()
         elif action == set_color:
             current_bg = row.get("bg")
@@ -563,12 +563,12 @@ class MainWindow(QMainWindow):
             if cdlg.exec() == QDialog.Accepted:
                 row["bg"] = cdlg.currentColor().name()
                 self._save_state()
-                self._snapshot_scheduler.request("layout_change")
+                self._try_snapshot(reason="layout_change",priority="medium")
                 self._rebuild_rows()
         elif action == reset_color:
             row["bg"] = None
             self._save_state()
-            self._snapshot_scheduler.request("layout_change")
+            self._try_snapshot(reason="layout_change",priority="medium")
             self._rebuild_rows()
         elif is_timer and action == set_time:
             current = _format_time(self.clients[rowid].current_elapsed)
@@ -603,7 +603,7 @@ class MainWindow(QMainWindow):
                 self._collapsed_groups.discard(rowid)
             self.rows = [r for r in self.rows if r["rowid"] != rowid]
             self._save_state()
-            self._snapshot_scheduler.request("layout_change")
+            self._try_snapshot(reason="layout_change",priority="medium")
             self._rebuild_rows()
             QTimer.singleShot(0, self.adjustSize)
 
@@ -660,10 +660,8 @@ class MainWindow(QMainWindow):
             self.daily_reset_time = dlg.chosen_daily_reset_time
             self.snapshot_min_minutes = dlg.chosen_snapshot_min_minutes
 
-            self._snapshot_scheduler._min_interval = self.snapshot_min_minutes * 60
-
             self._save_state()
-            self._snapshot_scheduler.request("settings_change")
+            self._try_snapshot(reason="layout_change",priority="high")
 
             self._apply_style()
             self._rebuild_rows()
@@ -816,9 +814,7 @@ class MainWindow(QMainWindow):
         if self._tick_n % 20 == 0:
             self._save_state()
 
-        should, reason = self._snapshot_scheduler.check()
-        if should:
-            self._do_snapshot(reason)
+        self._try_snapshot(reason="tick",priority="low")
 
     # ------------------------------------------------------------------ #
     #  Persistence helpers                                                 #
@@ -869,11 +865,18 @@ class MainWindow(QMainWindow):
         config.save_state(state)
         return state
 
-    def _do_snapshot(self, reason, priority="normal"):
-        state = self._save_state()
-        create_snapshot(state, str(config.SNAPSHOT_DIR), reason, priority)
-        prune_snapshots(str(config.SNAPSHOT_DIR))
-        self._snapshot_scheduler.mark_done()
+    def _try_snapshot(self, reason, priority="low"):
+        now = time.monotonic()
+        if ((priority == "low" and now - self._last_snapshot_time > self.snapshot_min_minutes * 60)
+            or (priority == "medium" and now - self._last_snapshot_time > self._snapshot_debounce)
+            or priority == "high"):
+            state = self._save_state()
+            created_snapshot_path = create_snapshot(state, reason, priority)
+            self._last_snapshot_time = now
+            prune_snapshots()
+            return created_snapshot_path
+        else:
+            return None
 
     # ------------------------------------------------------------------ #
     #  Daily reset                                                         #
@@ -905,7 +908,7 @@ class MainWindow(QMainWindow):
         self._update_all_displays()
 
         self._session_start = boundary_dt
-        self._do_snapshot("daily_reset_rollover", "high")
+        self._try_snapshot(reason="daily_reset_rollover", priority="high")
 
     # ------------------------------------------------------------------ #
     #  Window close                                                        #
@@ -913,7 +916,7 @@ class MainWindow(QMainWindow):
 
     def closeEvent(self, event):
         try:
-            self._do_snapshot("app_exit", "high")
+            self._try_snapshot(reason="app_exit", priority="high")
         except Exception as e:
             QMessageBox.warning(self, "Save Error",
                                 f"Failed to save state:\n{e}")
