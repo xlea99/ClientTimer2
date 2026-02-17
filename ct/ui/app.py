@@ -25,7 +25,9 @@ from ct.core.timer_state import TimerState
 from ct.ui.dialogs import ConfigDialog
 from ct.ui.drag import DragController
 from ct.ui.theme import THEMES, SIZES, build_stylesheet, build_menu_stylesheet
-from ct.ui.widgets import BuildContext, build_separator_row, build_timer_row, build_footer, _format_time
+from ct.ui.ui_blueprint import UIBlueprint
+from ct.ui.row_factory import RowFactory
+from ct.util import format_time
 
 _SANITIZE = re.compile(r"[^a-zA-Z0-9\s'.]+")
 
@@ -199,6 +201,8 @@ class MainWindow(QMainWindow):
 
         self._grid.setSpacing(s.get("v_spacing", s["padding"]))
 
+        # UIBlueprint to use for constructing new rows.
+        blueprint = UIBlueprint.compute(t, s, self.font_family, self.rows, self._has_mdl2)
         if not self.rows:
             lbl = QLabel("No clients. Add one to begin!")
             lbl.setFont(QFont(self.font_family, s["label"]))
@@ -206,8 +210,6 @@ class MainWindow(QMainWindow):
             self._grid.addWidget(lbl)
             self._visible_rowids = []
         else:
-            ctx = BuildContext.compute(t, s, self.font_family, self.rows, self._has_mdl2)
-
             # Determine visible entries
             current_group_rid = None
             visible_entries = []
@@ -231,26 +233,9 @@ class MainWindow(QMainWindow):
                     visible_entries.append((row, is_child))
 
             self._visible_rowids = [r["rowid"] for r, _ in visible_entries]
-            group_header_bg = t.get("group_header_bg", t["bg"])
 
             for idx, (row, is_child) in enumerate(visible_entries):
                 rid = row["rowid"]
-
-                # Row background
-                if row["type"] == "separator":
-                    row_bg = row.get("bg") or group_header_bg
-                else:
-                    row_bg = row.get("bg") or t["bg"]
-                if self._drag.dragging_rid == rid:
-                    row_bg = t["row_dragged"]
-
-                # Border CSS for client separators
-                needs_sep = (self.client_separators
-                             and idx < len(visible_entries) - 1
-                             and row["type"] == "timer"
-                             and visible_entries[idx + 1][0]["type"] == "timer")
-                border_css = (f"border-bottom: 1px solid {t['row_separator']};"
-                              if needs_sep else "")
 
                 if row["type"] == "separator":
                     collapsed = rid in self._collapsed_groups
@@ -264,46 +249,51 @@ class MainWindow(QMainWindow):
                         for cid in children)
                     total = self._group_total_time(rid)
 
-                    rc, wd = build_separator_row(
-                        ctx, rid, row, children, collapsed,
-                        has_running, total,
-                        self.show_group_count, self.show_group_time,
-                        is_child, row_bg, border_css,
-                        on_toggle=self._on_group_toggle,
-                        on_remove=self._on_remove_group,
+                    row_container, widget_dict = RowFactory.separator(
+                        blueprint=blueprint, rid=rid, row=row, children=children,total_time=total,
+                        is_dragging= self._drag.dragging_rid == rid,collapsed=collapsed,
+                        has_running= has_running,show_count= self.show_group_count,show_time= self.show_group_time,
+                        on_toggle= self._on_group_toggle,
+                        on_remove= self._on_remove_group,
                     )
                 else:
+                    # Determine whether to draw a separator line underneathe
+                    needs_sep = (self.client_separators
+                                 and idx < len(visible_entries) - 1
+                                 and visible_entries[idx + 1][0]["type"] == "timer")
+
                     state = self.timers[rid]
-                    rc, wd = build_timer_row(
-                        ctx, rid, row, state, is_child, row_bg,
-                        border_css, self._shift_held, self.label_align,
+                    row_container, widget_dict = RowFactory.timer(
+                        blueprint=blueprint, rid=rid, row=row, state=state,
+                        shift_held=self._shift_held, label_align=self.label_align,
+                        is_child=is_child,is_dragging= self._drag.dragging_rid == rid,draw_separator_line=needs_sep,
                         on_start=self._on_start,
                         on_stop=self._on_stop,
                         on_adjust=self._on_adjust,
-                        on_remove=self._on_remove,
+                        on_remove=self._on_remove
                     )
                     if state.running:
-                        self._set_bold(rid, True, wd)
+                        self._set_bold(rid, True, widget_dict)
 
-                self._widgets[rid] = wd
+                self._widgets[rid] = widget_dict
 
                 # Hover underline + right-click context menu
-                rc.installEventFilter(self)
-                rc.setContextMenuPolicy(Qt.CustomContextMenu)
-                rc.customContextMenuRequested.connect(
-                    lambda pos, r=rid, w=rc: self._on_row_context_menu(
+                row_container.installEventFilter(self)
+                row_container.setContextMenuPolicy(Qt.CustomContextMenu)
+                row_container.customContextMenuRequested.connect(
+                    lambda pos, r=rid, w=row_container: self._on_row_context_menu(
                         r, w.mapToGlobal(pos))
                 )
-                for child in rc.findChildren(QPushButton):
+                for child in row_container.findChildren(QPushButton):
                     child.setContextMenuPolicy(Qt.PreventContextMenu)
-                for child in rc.findChildren(QLabel):
+                for child in row_container.findChildren(QLabel):
                     child.setAttribute(Qt.WA_TransparentForMouseEvents)
                 if self._rearranging:
-                    rc.setCursor(Qt.OpenHandCursor)
-                    for child in rc.findChildren(QPushButton):
+                    row_container.setCursor(Qt.OpenHandCursor)
+                    for child in row_container.findChildren(QPushButton):
                         child.setCursor(Qt.ArrowCursor)
 
-                self._grid.addWidget(rc)
+                self._grid.addWidget(row_container)
 
         # Footer separator
         if self.rows:
@@ -313,9 +303,8 @@ class MainWindow(QMainWindow):
             self._grid.addWidget(sep)
 
         # Footer
-        ctx_footer = BuildContext.compute(t, s, self.font_family, self.rows, self._has_mdl2)
-        footer, fw = build_footer(
-            ctx_footer, self._rearranging,
+        footer, fw = RowFactory.footer(
+            blueprint=blueprint, rearranging=self._rearranging,
             on_rearrange=self._on_rearrange_toggle,
             on_add=self._on_add,
             on_add_group=self._on_add_group,
@@ -571,7 +560,7 @@ class MainWindow(QMainWindow):
             self._try_snapshot(reason="layout_change",priority="medium")
             self._rebuild_rows()
         elif is_timer and action == set_time:
-            current = _format_time(self.timers[rowid].current_elapsed)
+            current = format_time(self.timers[rowid].current_elapsed)
             text, ok = QInputDialog.getText(
                 self, "Set Time", "Enter time (HH:MM:SS):", text=current)
             if ok and text.strip():
@@ -588,7 +577,7 @@ class MainWindow(QMainWindow):
                     parent = self._parent_group(rowid)
                     if parent is not None and parent in self._widgets:
                         self._widgets[parent]["time"].setText(
-                            _format_time(self._group_total_time(parent)))
+                            format_time(self._group_total_time(parent)))
         elif action == delete_action:
             if self.confirm_delete:
                 if QMessageBox.question(
@@ -770,7 +759,7 @@ class MainWindow(QMainWindow):
     def _update_display(self, rowid):
         if rowid in self._widgets:
             self._widgets[rowid]["time"].setText(
-                _format_time(self.timers[rowid].current_elapsed)
+                format_time(self.timers[rowid].current_elapsed)
             )
 
     def _update_all_displays(self):
@@ -802,7 +791,7 @@ class MainWindow(QMainWindow):
                 if rid in self._widgets and self._widgets[rid].get("is_group"):
                     w = self._widgets[rid]
                     if self.show_group_time:
-                        w["time"].setText(_format_time(self._group_total_time(rid)))
+                        w["time"].setText(format_time(self._group_total_time(rid)))
                     if self.show_group_count:
                         w["count"].setText(
                             f"({len(self._group_children(rid))})")

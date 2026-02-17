@@ -5,6 +5,14 @@ from datetime import datetime
 def now_iso():
     return datetime.now().astimezone().isoformat()
 
+# Given seconds as a number, this method returns a pretty HH:MM:SS formatted string. Negative values
+# get clamped to zero.
+def format_time(seconds : int | float):
+    seconds = max(0, int(seconds))
+    h, rem = divmod(seconds, 3600)
+    m, s = divmod(rem, 60)
+    return f"{h:02d}:{m:02d}:{s:02d}"
+
 # Given a path to an old ClientTimer1 config.txt, this extracts a dict of settings.
 def read_old_config(old_config_path):
     # Dict for roughly translating one theme to another, although since they've changed a lot its approximation.
