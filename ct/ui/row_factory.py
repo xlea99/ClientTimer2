@@ -30,6 +30,7 @@ class RowFactory:
                             show_count: bool,
                             show_time: bool,
                             is_dragging: bool,
+                            show_x: bool,
                             on_toggle: Callable[...,Any],
                             on_remove: Callable[...,Any]):
 
@@ -101,6 +102,7 @@ class RowFactory:
         x_btn.setFont(blueprint.action_font)
         x_btn.setFixedWidth(blueprint.col5_size.width())
         x_btn.clicked.connect(lambda _=False: on_remove(rid))
+        x_btn.setVisible(show_x)
         row_container_layout.addWidget(x_btn)
 
         widget_dict = {
@@ -122,6 +124,7 @@ class RowFactory:
                         draw_separator_line: bool,
                         shift_held: bool,
                         label_align: LabelAlign,
+                        button_visibility: str,
                         on_start: Callable[...,Any],
                         on_stop: Callable[...,Any],
                         on_adjust: Callable[...,Any],
@@ -215,6 +218,7 @@ class RowFactory:
         adj_lay.setSpacing(blueprint.btn_spacing)
         adj_lay.addWidget(minus_btn)
         adj_lay.addWidget(plus_btn)
+        adj_container.setVisible(button_visibility != "None")
         rc_lay.addWidget(adj_container)
 
         # Col 5: X / 0
@@ -222,6 +226,7 @@ class RowFactory:
         x_btn.setFont(blueprint.action_font)
         x_btn.setFixedWidth(blueprint.col5_size.width())
         x_btn.clicked.connect(lambda _=False: on_remove(rid))
+        x_btn.setVisible(button_visibility == "All")
         rc_lay.addWidget(x_btn)
 
         widget_dict = {
