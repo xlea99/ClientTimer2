@@ -39,13 +39,18 @@ _SANITIZE = re.compile(r"[^a-zA-Z0-9\s'.]+")
 class MainWindow(QMainWindow):
 
     def __init__(self):
-        super().__init__()
-        self.setWindowTitle("Client Timer 2")
-        icon = QIcon(str(PATHS.assets / "icon.ico"))
-        self.setWindowIcon(icon)
+        # Load state before super().__init__() so we can pass the correct
+        # window flags directly — avoids a second HWND creation (and visible
+        # flash) that setWindowFlags() would cause after the fact.
+        state = AppState.load()
+        flags = Qt.Window
+        if state.settings.always_on_top:
+            flags |= Qt.WindowStaysOnTopHint
+        super().__init__(flags=flags)
+        self._state = state
 
-        # -- Load state --
-        self._state = AppState.load()
+        self.setWindowTitle("Client Timer 2")
+        self.setWindowIcon(QIcon(str(PATHS.assets / "icon.ico")))
 
         self._next_rowid = max(
             (r["rowid"] for r in self._state.rows), default=-1) + 1
@@ -61,9 +66,6 @@ class MainWindow(QMainWindow):
                     elapsed=tt.get("elapsed", 0.0),
                     running_since=tt.get("running_since"),
                 )
-
-        if self._state.settings.always_on_top:
-            self.setWindowFlags(self.windowFlags() | Qt.WindowStaysOnTopHint)
 
         self._widgets      = {}
         self._has_mdl2     = "Segoe MDL2 Assets" in QFontDatabase.families()
@@ -94,7 +96,7 @@ class MainWindow(QMainWindow):
 
         self._apply_style()
         self._rebuild_rows()
-        QTimer.singleShot(0, self.adjustSize)
+        self.adjustSize()
 
         # -- Tick timer (1 s) --
         self._tick_n = 0
