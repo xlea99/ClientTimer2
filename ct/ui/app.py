@@ -19,7 +19,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 from ct.common.setup import PATHS
-from ct.core import config
+from ct.core.config import AppState, save_completed_session
 from ct.core.snapshot import create_snapshot, prune_snapshots
 from ct.core.timer_state import TimerState
 from ct.ui.dialogs import ConfigDialog
@@ -36,7 +36,6 @@ _SANITIZE = re.compile(r"[^a-zA-Z0-9\s'.]+")
 # Main window
 # ---------------------------------------------------------------------------
 
-# Main window of the actual clienttimer2 application. What displays timers, separators, etc
 class MainWindow(QMainWindow):
 
     def __init__(self):
@@ -45,52 +44,31 @@ class MainWindow(QMainWindow):
         icon = QIcon(str(PATHS.assets / "icon.ico"))
         self.setWindowIcon(icon)
 
-        # -- Load unified state --
-        state = config.load_state()
-        s = state["settings"]
-        self.theme = s["theme"] if s["theme"] in THEMES else "Cupertino Light"
-        self.ui_size = s["size"] if s["size"] in SIZES else "Regular"
-        self.label_align = s.get("label_align", "Left")
-        self.client_separators = s.get("client_separators", False)
-        self.show_group_count = s.get("show_group_count", True)
-        self.show_group_time = s.get("show_group_time", True)
-        self.font_family = s.get("font", "Calibri")
-        self.always_on_top = s.get("always_on_top", True)
-        self.confirm_delete = s.get("confirm_delete", True)
-        self.confirm_reset = s.get("confirm_reset", True)
-        self.daily_reset_enabled = s.get("daily_reset_enabled", False)
-        self.daily_reset_time = s.get("daily_reset_time", "00:00")
-        self.snapshot_min_minutes = s.get("snapshot_min_minutes", 5)
+        # -- Load state --
+        self._state = AppState.load()
 
-        if self.always_on_top:
-            self.setWindowFlags(self.windowFlags() | Qt.WindowStaysOnTopHint)
+        self._next_rowid = max(
+            (r["rowid"] for r in self._state.rows), default=-1) + 1
 
-        # -- Layout --
-        layout = state["layout"]
-        self.rows = list(layout["rows"])
-        self._next_rowid = max((r["rowid"] for r in self.rows), default=-1) + 1
-        self._collapsed_groups = set(layout.get("collapsed_groups", []))
-
-        # -- Session --
-        session = state["session"]
-        self._session_start = datetime.fromisoformat(session["start"])
-        tracked = session.get("tracked_times", {})
-
-        self.timers = {}  # rowid -> TimerState (timers only)
-        for row in self.rows:
+        # Restore live timer objects from saved tracked_times
+        self.timers = {}
+        for row in self._state.rows:
             if row["type"] == "timer":
                 rid = row["rowid"]
-                tt = tracked.get(str(rid), {})
+                tt  = self._state.tracked_times.get(str(rid), {})
                 self.timers[rid] = TimerState(
                     row["name"],
                     elapsed=tt.get("elapsed", 0.0),
                     running_since=tt.get("running_since"),
                 )
 
-        self._widgets = {}        # rowid -> widget dict
-        self._has_mdl2 = "Segoe MDL2 Assets" in QFontDatabase.families()
-        self._shift_held = False
-        self._rearranging = False
+        if self._state.settings.always_on_top:
+            self.setWindowFlags(self.windowFlags() | Qt.WindowStaysOnTopHint)
+
+        self._widgets      = {}
+        self._has_mdl2     = "Segoe MDL2 Assets" in QFontDatabase.families()
+        self._shift_held   = False
+        self._rearranging  = False
         self._visible_rowids = []  # populated by _rebuild_rows
 
         # -- Drag controller --
@@ -98,11 +76,10 @@ class MainWindow(QMainWindow):
 
         # -- Snapshot handling --
         self._last_snapshot_time = 0.0
-        # Ensure snapshots happen at least this many seconds apart, unless high priority.
-        self._snapshot_debounce = 10.0
+        self._snapshot_debounce  = 10.0  # seconds between non-high-priority snapshots
 
         # -- Check for missed daily reset at startup --
-        if self.daily_reset_enabled:
+        if self._state.settings.daily_reset_enabled:
             self._check_daily_reset_boundary()
 
         # -- Build UI skeleton --
@@ -121,7 +98,7 @@ class MainWindow(QMainWindow):
 
         # -- Tick timer (1 s) --
         self._tick_n = 0
-        self._timer = QTimer(self)
+        self._timer  = QTimer(self)
         self._timer.timeout.connect(self._tick)
         self._timer.start(1000)
 
@@ -130,13 +107,13 @@ class MainWindow(QMainWindow):
     # ------------------------------------------------------------------ #
 
     def _apply_style(self):
-        style = build_stylesheet(self.theme)
+        style = build_stylesheet(self._state.settings.theme)
         self.setStyleSheet(style)
         app = QApplication.instance()
         if app is not None:
             app.setStyleSheet(style)
 
-        s = SIZES.get(self.ui_size, SIZES["Regular"])
+        s = SIZES.get(self._state.settings.size, SIZES["Regular"])
         self._main_lay.setContentsMargins(
             s["frame_pad"], s["frame_pad"], s["frame_pad"], s["frame_pad"]
         )
@@ -153,7 +130,7 @@ class MainWindow(QMainWindow):
             return list(self._drag.group_rids)
         children = []
         found = False
-        for row in self.rows:
+        for row in self._state.rows:
             if row["rowid"] == group_rowid:
                 found = True
                 continue
@@ -174,7 +151,7 @@ class MainWindow(QMainWindow):
     def _parent_group(self, rowid):
         """Return the separator rowid that owns this timer, or None."""
         parent = None
-        for row in self.rows:
+        for row in self._state.rows:
             if row["type"] == "separator":
                 parent = row["rowid"]
             elif row["rowid"] == rowid:
@@ -196,25 +173,26 @@ class MainWindow(QMainWindow):
                 w.hide()
                 w.deleteLater()
 
-        t = THEMES.get(self.theme, THEMES["Cupertino Light"])
-        s = SIZES.get(self.ui_size, SIZES["Regular"])
+        ss = self._state.settings
+        t  = THEMES.get(ss.theme, THEMES["Cupertino Light"])
+        s  = SIZES.get(ss.size, SIZES["Regular"])
 
         self._grid.setSpacing(s.get("v_spacing", s["padding"]))
 
-        # UIBlueprint to use for constructing new rows.
-        blueprint = UIBlueprint.compute(t, s, self.font_family, self.rows, self._has_mdl2)
-        if not self.rows:
+        blueprint = UIBlueprint.compute(t, s, ss.font, self._state.rows, self._has_mdl2)
+
+        if not self._state.rows:
             lbl = QLabel("No clients. Add one to begin!")
-            lbl.setFont(QFont(self.font_family, s["label"]))
+            lbl.setFont(QFont(ss.font, s["label"]))
             lbl.setAlignment(Qt.AlignCenter)
             self._grid.addWidget(lbl)
             self._visible_rowids = []
         else:
-            # Determine visible entries
             current_group_rid = None
-            visible_entries = []
-            dragging_group = (self._drag.active and self._drag.group_rids is not None)
-            for row in self.rows:
+            visible_entries   = []
+            dragging_group    = (self._drag.active and self._drag.group_rids is not None)
+
+            for row in self._state.rows:
                 if row["type"] == "separator":
                     current_group_rid = row["rowid"]
                     visible_entries.append((row, False))
@@ -226,7 +204,7 @@ class MainWindow(QMainWindow):
                         continue
                     is_child = current_group_rid is not None
                     if (is_child
-                            and current_group_rid in self._collapsed_groups
+                            and current_group_rid in self._state.collapsed_groups
                             and not (dragging_group
                                      and current_group_rid == self._drag.dragging_rid)):
                         continue
@@ -238,9 +216,9 @@ class MainWindow(QMainWindow):
                 rid = row["rowid"]
 
                 if row["type"] == "separator":
-                    collapsed = rid in self._collapsed_groups
+                    collapsed = rid in self._state.collapsed_groups
                     if dragging_group and rid == self._drag.dragging_rid:
-                        children = list(self._drag.group_rids)
+                        children  = list(self._drag.group_rids)
                         collapsed = True
                     else:
                         children = self._group_children(rid)
@@ -250,34 +228,38 @@ class MainWindow(QMainWindow):
                     total = self._group_total_time(rid)
 
                     row_container, widget_dict = RowFactory.separator(
-                        blueprint=blueprint, rid=rid, row=row, children=children,total_time=total,
-                        is_dragging= self._drag.dragging_rid == rid,collapsed=collapsed,
-                        has_running= has_running,show_count= self.show_group_count,show_time= self.show_group_time,
-                        on_toggle= self._on_group_toggle,
-                        on_remove= self._on_remove_group,
+                        blueprint=blueprint, rid=rid, row=row,
+                        children=children, total_time=total,
+                        is_dragging=self._drag.dragging_rid == rid,
+                        collapsed=collapsed, has_running=has_running,
+                        show_count=ss.show_group_count, show_time=ss.show_group_time,
+                        show_x=(ss.button_visibility == "All"),
+                        on_toggle=self._on_group_toggle,
+                        on_remove=self._on_remove_group,
                     )
                 else:
-                    # Determine whether to draw a separator line underneathe
-                    needs_sep = (self.client_separators
+                    needs_sep = (ss.client_separators
                                  and idx < len(visible_entries) - 1
                                  and visible_entries[idx + 1][0]["type"] == "timer")
 
-                    state = self.timers[rid]
+                    timer_state = self.timers[rid]
                     row_container, widget_dict = RowFactory.timer(
-                        blueprint=blueprint, rid=rid, row=row, state=state,
-                        shift_held=self._shift_held, label_align=self.label_align,
-                        is_child=is_child,is_dragging= self._drag.dragging_rid == rid,draw_separator_line=needs_sep,
+                        blueprint=blueprint, rid=rid, row=row, state=timer_state,
+                        shift_held=self._shift_held, label_align=ss.label_align,
+                        button_visibility=ss.button_visibility,
+                        is_child=is_child,
+                        is_dragging=self._drag.dragging_rid == rid,
+                        draw_separator_line=needs_sep,
                         on_start=self._on_start,
                         on_stop=self._on_stop,
                         on_adjust=self._on_adjust,
-                        on_remove=self._on_remove
+                        on_remove=self._on_remove,
                     )
-                    if state.running:
+                    if timer_state.running:
                         self._set_bold(rid, True, widget_dict)
 
                 self._widgets[rid] = widget_dict
 
-                # Hover underline + right-click context menu
                 row_container.installEventFilter(self)
                 row_container.setContextMenuPolicy(Qt.CustomContextMenu)
                 row_container.customContextMenuRequested.connect(
@@ -296,7 +278,7 @@ class MainWindow(QMainWindow):
                 self._grid.addWidget(row_container)
 
         # Footer separator
-        if self.rows:
+        if self._state.rows:
             sep = QWidget()
             sep.setFixedHeight(2)
             sep.setStyleSheet(f"background-color: {t['separator']};")
@@ -311,11 +293,11 @@ class MainWindow(QMainWindow):
             on_config=self._on_config,
             on_add_input_return=self._on_add,
         )
-        self._rearrange_btn = fw["rearrange_btn"]
-        self._add_btn = fw["add_btn"]
-        self._add_group_btn = fw["add_group_btn"]
-        self._add_input = fw["add_input"]
-        self._cfg_btn = fw["cfg_btn"]
+        self._rearrange_btn  = fw["rearrange_btn"]
+        self._add_btn        = fw["add_btn"]
+        self._add_group_btn  = fw["add_group_btn"]
+        self._add_input      = fw["add_input"]
+        self._cfg_btn        = fw["cfg_btn"]
         self._grid.addWidget(footer)
 
         QTimer.singleShot(0, self._sync_footer_heights)
@@ -362,11 +344,9 @@ class MainWindow(QMainWindow):
     # ------------------------------------------------------------------ #
 
     def eventFilter(self, obj, event):
-        # Active drag — delegate to controller
         if self._drag.active:
             return self._drag.handle_event(obj, event)
 
-        # Row hover handling
         if event.type() == QEvent.Enter:
             rid = self._drag.rid_for_container(obj)
             if rid is not None:
@@ -376,7 +356,6 @@ class MainWindow(QMainWindow):
             if rid is not None:
                 self._on_row_hover(rid, False)
 
-        # Drag initiation
         if self._rearranging and event.type() == QEvent.MouseButtonPress:
             if event.button() == Qt.LeftButton:
                 rid = self._drag.rid_for_container(obj)
@@ -406,58 +385,58 @@ class MainWindow(QMainWindow):
         self._save_state()
 
     def _on_add(self):
-        raw = self._add_input.text().strip()
+        raw  = self._add_input.text().strip()
         name = _SANITIZE.sub("", raw).strip()
         if not name:
             return
         rid = self._next_rowid
         self._next_rowid += 1
-        self.rows.append({"rowid": rid, "name": name, "type": "timer", "bg": None})
+        self._state.rows.append({"rowid": rid, "name": name, "type": "timer", "bg": None})
         self.timers[rid] = TimerState(name)
         self._save_state()
-        self._try_snapshot(reason="layout_change",priority="medium")
+        self._try_snapshot(reason="layout_change", priority="medium")
         self._rebuild_rows()
 
     def _on_add_group(self):
-        raw = self._add_input.text().strip()
+        raw  = self._add_input.text().strip()
         name = _SANITIZE.sub("", raw).strip()
         if not name:
             return
         rid = self._next_rowid
         self._next_rowid += 1
-        self.rows.append({"rowid": rid, "name": name, "type": "separator", "bg": None})
+        self._state.rows.append({"rowid": rid, "name": name, "type": "separator", "bg": None})
         self._save_state()
-        self._try_snapshot(reason="layout_change",priority="medium")
+        self._try_snapshot(reason="layout_change", priority="medium")
         self._rebuild_rows()
 
     def _on_remove_group(self, rowid):
-        if self.confirm_delete:
+        if self._state.settings.confirm_delete:
             name = next(
-                (r["name"] for r in self.rows if r["rowid"] == rowid), "")
+                (r["name"] for r in self._state.rows if r["rowid"] == rowid), "")
             if QMessageBox.question(
                     self, "Confirm Delete",
                     f"Delete group '{name}'?"
             ) != QMessageBox.Yes:
                 return
-        self._collapsed_groups.discard(rowid)
-        self.rows = [r for r in self.rows if r["rowid"] != rowid]
+        self._state.collapsed_groups.discard(rowid)
+        self._state.rows = [r for r in self._state.rows if r["rowid"] != rowid]
         self._save_state()
-        self._try_snapshot(reason="layout_change",priority="medium")
+        self._try_snapshot(reason="layout_change", priority="medium")
         self._rebuild_rows()
         QTimer.singleShot(0, self.adjustSize)
 
     def _on_group_toggle(self, rowid):
-        if rowid in self._collapsed_groups:
-            self._collapsed_groups.discard(rowid)
+        if rowid in self._state.collapsed_groups:
+            self._state.collapsed_groups.discard(rowid)
         else:
-            self._collapsed_groups.add(rowid)
+            self._state.collapsed_groups.add(rowid)
         self._save_state()
         self._rebuild_rows()
         QTimer.singleShot(0, self.adjustSize)
 
     def _on_remove(self, rowid):
         if QApplication.keyboardModifiers() & Qt.ShiftModifier:
-            if self.confirm_reset:
+            if self._state.settings.confirm_reset:
                 name = self.timers[rowid].name
                 if QMessageBox.question(
                         self, "Confirm Reset",
@@ -469,9 +448,9 @@ class MainWindow(QMainWindow):
             self._set_bold(rowid, False)
             self._update_display(rowid)
         else:
-            if self.confirm_delete:
+            if self._state.settings.confirm_delete:
                 name = next(
-                    (r["name"] for r in self.rows if r["rowid"] == rowid), "")
+                    (r["name"] for r in self._state.rows if r["rowid"] == rowid), "")
                 if QMessageBox.question(
                         self, "Confirm Delete",
                         f"Delete '{name}'?"
@@ -479,9 +458,9 @@ class MainWindow(QMainWindow):
                     return
             self.timers[rowid].stop()
             del self.timers[rowid]
-            self.rows = [r for r in self.rows if r["rowid"] != rowid]
+            self._state.rows = [r for r in self._state.rows if r["rowid"] != rowid]
             self._save_state()
-            self._try_snapshot(reason="layout_change",priority="medium")
+            self._try_snapshot(reason="layout_change", priority="medium")
             self._rebuild_rows()
             QTimer.singleShot(0, self.adjustSize)
 
@@ -502,20 +481,20 @@ class MainWindow(QMainWindow):
         name_lbl.setFont(f)
 
     def _on_row_context_menu(self, rowid, global_pos):
-        row = next((r for r in self.rows if r["rowid"] == rowid), None)
+        row = next((r for r in self._state.rows if r["rowid"] == rowid), None)
         if row is None:
             return
         is_timer = row["type"] == "timer"
 
         menu = QMenu(self)
-        menu.setStyleSheet(build_menu_stylesheet(self.theme))
+        menu.setStyleSheet(build_menu_stylesheet(self._state.settings.theme))
 
         rename_action = menu.addAction("Rename")
         menu.addSeparator()
-        set_color = menu.addAction("Set Color")
-        reset_color = menu.addAction("Reset Color")
+        set_color    = menu.addAction("Set Color")
+        reset_color  = menu.addAction("Reset Color")
         menu.addSeparator()
-        set_time = menu.addAction("Set Time") if is_timer else None
+        set_time     = menu.addAction("Set Time") if is_timer else None
         delete_action = menu.addAction("Delete")
 
         action = menu.exec(global_pos)
@@ -532,11 +511,11 @@ class MainWindow(QMainWindow):
                     if is_timer and rowid in self.timers:
                         self.timers[rowid].name = new_name
                     self._save_state()
-                    self._try_snapshot(reason="layout_change",priority="medium")
+                    self._try_snapshot(reason="layout_change", priority="medium")
                     self._rebuild_rows()
         elif action == set_color:
             current_bg = row.get("bg")
-            initial = QColor(current_bg) if current_bg else QColor(255, 255, 255)
+            initial    = QColor(current_bg) if current_bg else QColor(255, 255, 255)
             cdlg = QColorDialog(initial, self)
             cdlg.setStyleSheet(
                 "QColorDialog { background-color: #2a2a2a; }"
@@ -552,12 +531,12 @@ class MainWindow(QMainWindow):
             if cdlg.exec() == QDialog.Accepted:
                 row["bg"] = cdlg.currentColor().name()
                 self._save_state()
-                self._try_snapshot(reason="layout_change",priority="medium")
+                self._try_snapshot(reason="layout_change", priority="medium")
                 self._rebuild_rows()
         elif action == reset_color:
             row["bg"] = None
             self._save_state()
-            self._try_snapshot(reason="layout_change",priority="medium")
+            self._try_snapshot(reason="layout_change", priority="medium")
             self._rebuild_rows()
         elif is_timer and action == set_time:
             current = format_time(self.timers[rowid].current_elapsed)
@@ -566,20 +545,20 @@ class MainWindow(QMainWindow):
             if ok and text.strip():
                 secs = self._parse_time_input(text.strip())
                 if secs is not None:
-                    state = self.timers[rowid]
-                    was_running = state.running
+                    ts = self.timers[rowid]
+                    was_running = ts.running
                     if was_running:
-                        state.stop()
-                    state.elapsed = secs
+                        ts.stop()
+                    ts.elapsed = secs
                     if was_running:
-                        state.start()
+                        ts.start()
                     self._update_display(rowid)
                     parent = self._parent_group(rowid)
                     if parent is not None and parent in self._widgets:
                         self._widgets[parent]["time"].setText(
                             format_time(self._group_total_time(parent)))
         elif action == delete_action:
-            if self.confirm_delete:
+            if self._state.settings.confirm_delete:
                 if QMessageBox.question(
                         self, "Confirm Delete",
                         f"Delete '{row['name']}'?"
@@ -589,10 +568,10 @@ class MainWindow(QMainWindow):
                 self.timers[rowid].stop()
                 del self.timers[rowid]
             else:
-                self._collapsed_groups.discard(rowid)
-            self.rows = [r for r in self.rows if r["rowid"] != rowid]
+                self._state.collapsed_groups.discard(rowid)
+            self._state.rows = [r for r in self._state.rows if r["rowid"] != rowid]
             self._save_state()
-            self._try_snapshot(reason="layout_change",priority="medium")
+            self._try_snapshot(reason="layout_change", priority="medium")
             self._rebuild_rows()
             QTimer.singleShot(0, self.adjustSize)
 
@@ -615,56 +594,42 @@ class MainWindow(QMainWindow):
     # ------------------------------------------------------------------ #
 
     def _on_config(self):
-        cfg = {
-            "theme": self.theme,
-            "size": self.ui_size,
-            "font": self.font_family,
-            "label_align": self.label_align,
-            "client_separators": self.client_separators,
-            "show_group_count": self.show_group_count,
-            "show_group_time": self.show_group_time,
-            "always_on_top": self.always_on_top,
-            "confirm_delete": self.confirm_delete,
-            "confirm_reset": self.confirm_reset,
-            "daily_reset_enabled": self.daily_reset_enabled,
-            "daily_reset_time": self.daily_reset_time,
-            "snapshot_min_minutes": self.snapshot_min_minutes,
-        }
-
-        dlg = ConfigDialog(self, cfg, on_reset=self._reset_all)
+        dlg = ConfigDialog(self, self._state.settings.to_dict(), on_reset=self._reset_all)
         if dlg.exec() == QDialog.Accepted and dlg.style_changed:
-            old_aot = self.always_on_top
+            old_aot = self._state.settings.always_on_top
 
-            self.theme = dlg.chosen_theme
-            self.ui_size = dlg.chosen_size
-            self.font_family = dlg.chosen_font
-            self.label_align = dlg.chosen_label_align
-            self.client_separators = dlg.chosen_client_separators
-            self.show_group_count = dlg.chosen_show_group_count
-            self.show_group_time = dlg.chosen_show_group_time
-            self.always_on_top = dlg.chosen_always_on_top
-            self.confirm_delete = dlg.chosen_confirm_delete
-            self.confirm_reset = dlg.chosen_confirm_reset
-            self.daily_reset_enabled = dlg.chosen_daily_reset_enabled
-            self.daily_reset_time = dlg.chosen_daily_reset_time
-            self.snapshot_min_minutes = dlg.chosen_snapshot_min_minutes
+            s = self._state.settings
+            s.theme                = dlg.chosen_theme
+            s.size                 = dlg.chosen_size
+            s.font                 = dlg.chosen_font
+            s.label_align          = dlg.chosen_label_align
+            s.client_separators    = dlg.chosen_client_separators
+            s.show_group_count     = dlg.chosen_show_group_count
+            s.show_group_time      = dlg.chosen_show_group_time
+            s.always_on_top        = dlg.chosen_always_on_top
+            s.confirm_delete       = dlg.chosen_confirm_delete
+            s.confirm_reset        = dlg.chosen_confirm_reset
+            s.daily_reset_enabled  = dlg.chosen_daily_reset_enabled
+            s.daily_reset_time     = dlg.chosen_daily_reset_time
+            s.snapshot_min_minutes = dlg.chosen_snapshot_min_minutes
+            s.button_visibility    = dlg.chosen_button_visibility
 
             self._save_state()
-            self._try_snapshot(reason="layout_change",priority="high")
+            self._try_snapshot(reason="layout_change", priority="high")
 
             self._apply_style()
             self._rebuild_rows()
             QTimer.singleShot(0, self.adjustSize)
 
-            if self.always_on_top != old_aot:
+            if self._state.settings.always_on_top != old_aot:
                 if sys.platform == "win32":
                     hwnd = int(self.winId())
-                    flag = -1 if self.always_on_top else -2
+                    flag = -1 if self._state.settings.always_on_top else -2
                     ctypes.windll.user32.SetWindowPos(
                         hwnd, flag, 0, 0, 0, 0, 0x0013)
                 else:
                     self.setWindowFlag(
-                        Qt.WindowStaysOnTopHint, self.always_on_top)
+                        Qt.WindowStaysOnTopHint, self._state.settings.always_on_top)
                     self.show()
 
     # ------------------------------------------------------------------ #
@@ -680,16 +645,16 @@ class MainWindow(QMainWindow):
         self._set_bold(rowid, True)
 
     def _stop_all(self):
-        for rid, state in self.timers.items():
-            if state.running:
-                state.stop()
+        for rid, ts in self.timers.items():
+            if ts.running:
+                ts.stop()
                 self._set_bold(rid, False)
                 self._update_display(rid)
 
     def _stop_one(self, rowid):
-        state = self.timers[rowid]
-        if state.running:
-            state.stop()
+        ts = self.timers[rowid]
+        if ts.running:
+            ts.stop()
             self._set_bold(rowid, False)
             self._update_display(rowid)
 
@@ -698,8 +663,8 @@ class MainWindow(QMainWindow):
                 self, "Confirm", "Reset all times to zero?"
         ) == QMessageBox.Yes:
             self._stop_all()
-            for state in self.timers.values():
-                state.reset()
+            for ts in self.timers.values():
+                ts.reset()
             self._update_all_displays()
 
     # ------------------------------------------------------------------ #
@@ -712,14 +677,14 @@ class MainWindow(QMainWindow):
         if not w or w.get("is_group"):
             return
 
-        t = THEMES.get(self.theme, THEMES["Cupertino Light"])
+        t         = THEMES.get(self._state.settings.theme, THEMES["Cupertino Light"])
         normal_fg = t["text"]
         running_fg = t.get("running_text", normal_fg)
-        color = running_fg if bold else normal_fg
+        color     = running_fg if bold else normal_fg
 
         for key in ("name", "time"):
             lbl = w[key]
-            f = lbl.font()
+            f   = lbl.font()
             f.setBold(bold)
             lbl.setFont(f)
             lbl.setStyleSheet(f"color: {color};")
@@ -743,15 +708,15 @@ class MainWindow(QMainWindow):
             if cid in self.timers
         )
 
-        t = THEMES.get(self.theme, THEMES["Cupertino Light"])
-        normal_fg = t.get("group_header_text", t["text"])
+        t          = THEMES.get(self._state.settings.theme, THEMES["Cupertino Light"])
+        normal_fg  = t.get("group_header_text", t["text"])
         running_fg = t.get("group_running_text", normal_fg)
-        color = running_fg if has_running else normal_fg
+        color      = running_fg if has_running else normal_fg
 
         w = self._widgets[group_rowid]
         for key in ("name", "time"):
             lbl = w[key]
-            f = lbl.font()
+            f   = lbl.font()
             f.setBold(has_running)
             lbl.setFont(f)
             lbl.setStyleSheet(f"color: {color};")
@@ -781,8 +746,8 @@ class MainWindow(QMainWindow):
 
     def _tick(self):
         any_running = False
-        for rid, state in self.timers.items():
-            if state.running:
+        for rid, ts in self.timers.items():
+            if ts.running:
                 any_running = True
                 self._update_display(rid)
 
@@ -790,82 +755,40 @@ class MainWindow(QMainWindow):
             for rid in self._visible_rowids:
                 if rid in self._widgets and self._widgets[rid].get("is_group"):
                     w = self._widgets[rid]
-                    if self.show_group_time:
+                    if self._state.settings.show_group_time:
                         w["time"].setText(format_time(self._group_total_time(rid)))
-                    if self.show_group_count:
+                    if self._state.settings.show_group_count:
                         w["count"].setText(
                             f"({len(self._group_children(rid))})")
 
-        if self.daily_reset_enabled:
+        if self._state.settings.daily_reset_enabled:
             self._check_daily_reset_boundary()
 
         self._tick_n += 1
         if self._tick_n % 20 == 0:
             self._save_state()
 
-        self._try_snapshot(reason="tick",priority="low")
+        self._try_snapshot(reason="tick", priority="low")
 
     # ------------------------------------------------------------------ #
     #  Persistence helpers                                                 #
     # ------------------------------------------------------------------ #
 
-    def _build_state_dict(self):
-        tracked = {}
-        for rid, st in self.timers.items():
-            st.freeze()
-            entry = {"elapsed": st.elapsed}
-            if st.running and st.started_at:
-                entry["running_since"] = st.started_at.isoformat()
-            tracked[str(rid)] = entry
-
-        return {
-            "meta": {
-                "schema_version": 1,
-                "saved_at": config.now_iso(),
-                "is_completed_session": False,
-            },
-            "layout": {
-                "rows": list(self.rows),
-                "collapsed_groups": list(self._collapsed_groups),
-            },
-            "settings": {
-                "theme": self.theme,
-                "size": self.ui_size,
-                "font": self.font_family,
-                "label_align": self.label_align,
-                "client_separators": self.client_separators,
-                "show_group_count": self.show_group_count,
-                "show_group_time": self.show_group_time,
-                "always_on_top": self.always_on_top,
-                "confirm_delete": self.confirm_delete,
-                "confirm_reset": self.confirm_reset,
-                "daily_reset_enabled": self.daily_reset_enabled,
-                "daily_reset_time": self.daily_reset_time,
-                "snapshot_min_minutes": self.snapshot_min_minutes,
-            },
-            "session": {
-                "start": self._session_start.isoformat(),
-                "tracked_times": tracked,
-            },
-        }
-
     def _save_state(self):
-        state = self._build_state_dict()
-        config.save_state(state)
-        return state
+        return self._state.save(self.timers)
 
     def _try_snapshot(self, reason, priority="low"):
         now = time.monotonic()
-        if ((priority == "low" and now - self._last_snapshot_time > self.snapshot_min_minutes * 60)
-            or (priority == "medium" and now - self._last_snapshot_time > self._snapshot_debounce)
-            or priority == "high"):
+        min_secs = self._state.settings.snapshot_min_minutes * 60
+        if ((priority == "low" and now - self._last_snapshot_time > min_secs)
+                or (priority == "medium" and now - self._last_snapshot_time > self._snapshot_debounce)
+                or priority == "high"):
             state = self._save_state()
             created_snapshot_path = create_snapshot(state, reason, priority)
             self._last_snapshot_time = now
             prune_snapshots()
             return created_snapshot_path
-        else:
-            return None
+        return None
 
     # ------------------------------------------------------------------ #
     #  Daily reset                                                         #
@@ -873,7 +796,7 @@ class MainWindow(QMainWindow):
 
     def _most_recent_reset_boundary(self):
         try:
-            rh, rm = map(int, self.daily_reset_time.split(":"))
+            rh, rm = map(int, self._state.settings.daily_reset_time.split(":"))
         except ValueError:
             rh, rm = 0, 0
         now = datetime.now().astimezone()
@@ -884,19 +807,19 @@ class MainWindow(QMainWindow):
 
     def _check_daily_reset_boundary(self):
         boundary = self._most_recent_reset_boundary()
-        if self._session_start < boundary:
+        if self._state.session_start < boundary:
             self._do_daily_reset(boundary)
 
     def _do_daily_reset(self, boundary_dt):
-        state = self._build_state_dict()
-        config.save_completed_session(state, boundary_dt)
+        state = self._save_state()
+        save_completed_session(state, boundary_dt)
 
         self._stop_all()
-        for st in self.timers.values():
-            st.reset()
+        for ts in self.timers.values():
+            ts.reset()
         self._update_all_displays()
 
-        self._session_start = boundary_dt
+        self._state.session_start = boundary_dt
         self._try_snapshot(reason="daily_reset_rollover", priority="high")
 
     # ------------------------------------------------------------------ #

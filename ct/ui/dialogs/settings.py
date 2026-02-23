@@ -44,6 +44,7 @@ class ConfigDialog(QDialog):
         self.chosen_confirm_reset = cfg.get("confirm_reset", True)
         self.chosen_daily_reset_enabled = cfg.get("daily_reset_enabled", False)
         self.chosen_daily_reset_time = cfg.get("daily_reset_time", "00:00")
+        self.chosen_button_visibility = cfg.get("button_visibility", "All")
         self.style_changed = False
 
         # --- Layout ---
@@ -431,6 +432,22 @@ class ConfigDialog(QDialog):
         row.addWidget(self._grp_time)
         lay.addLayout(row)
 
+        # -- Button Visibility --
+        row = QHBoxLayout()
+        lbl = QLabel("Button Visibility:")
+        btn_vis_tooltip = "Controls which action buttons are shown on each timer row."
+        lbl.setFont(QFont("Calibri", 12, QFont.Bold))
+        lbl.setToolTip(btn_vis_tooltip)
+        self._btn_vis = QComboBox()
+        self._btn_vis.addItems(["All", "Adjust Only", "None"])
+        self._btn_vis.setCurrentText(cfg.get("button_visibility", "All"))
+        self._btn_vis.setMinimumWidth(230)
+        self._btn_vis.setToolTip(btn_vis_tooltip)
+        self._btn_vis.currentTextChanged.connect(self._refresh_preview)
+        row.addWidget(lbl)
+        row.addWidget(self._btn_vis)
+        lay.addLayout(row)
+
         # -- Live preview (group + 2 timers) --
         self._preview = QFrame()
         self._preview.setObjectName("preview")
@@ -665,6 +682,15 @@ class ConfigDialog(QDialog):
         self._p_gtime.setVisible(
             self._grp_time.currentText() == "Yes")
 
+        # Button visibility
+        bv = self._btn_vis.currentText()
+        show_adjust = bv != "None"
+        show_x      = bv == "All"
+        for w in (self._p1_minus, self._p1_plus, self._p2_minus, self._p2_plus):
+            w.setVisible(show_adjust)
+        for w in (self._p1_x, self._p2_x, self._p_gx):
+            w.setVisible(show_x)
+
     # ------------------------------------------------------------------ #
     #  Apply                                                               #
     # ------------------------------------------------------------------ #
@@ -693,5 +719,6 @@ class ConfigDialog(QDialog):
             self._grp_count.currentText() == "Yes")
         self.chosen_show_group_time = (
             self._grp_time.currentText() == "Yes")
+        self.chosen_button_visibility = self._btn_vis.currentText()
         self.style_changed = True
         self.accept()

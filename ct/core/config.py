@@ -1,161 +1,277 @@
 import copy
+import dataclasses
 import json
+from dataclasses import dataclass
 from datetime import datetime
+
 from ct.common.logger import log
-from ct.util import now_iso, read_old_config
 from ct.common.setup import PATHS
+from ct.util import now_iso, read_old_config
 
 
 _SCHEMA_VERSION = 1
 
-#region === Helpers and Paths ===
+# ---------------------------------------------------------------------------
+# Paths
+# ---------------------------------------------------------------------------
 
-STATE_PATH = PATHS.current / "state.json"
-SNAPSHOT_DIR = PATHS.snapshots
+STATE_PATH    = PATHS.current / "state.json"
+SNAPSHOT_DIR  = PATHS.snapshots
 COMPLETED_DIR = PATHS.sessions
 
-# Old path, used only for migration detection
 _OLD_CONFIG = PATHS.old / "config.txt"
 
-# Default values just for the settings section of the state dict.
+# ---------------------------------------------------------------------------
+# Settings defaults — single source of truth for all setting keys/values
+# ---------------------------------------------------------------------------
+
 _SETTINGS_DEFAULTS = {
-    "theme": "Cupertino Light",
-    "size": "Regular",
-    "font": "Calibri",
-    "label_align": "Left",
-    "client_separators": True,
-    "show_group_count": True,
-    "show_group_time": True,
-    "always_on_top": True,
-    "confirm_delete": True,
-    "confirm_reset": True,
-    "daily_reset_enabled": False,
-    "daily_reset_time": "00:00",
+    "theme":                "Cupertino Light",
+    "size":                 "Regular",
+    "font":                 "Calibri",
+    "label_align":          "Left",
+    "client_separators":    True,
+    "show_group_count":     True,
+    "show_group_time":      True,
+    "always_on_top":        True,
+    "confirm_delete":       True,
+    "confirm_reset":        True,
+    "daily_reset_enabled":  False,
+    "daily_reset_time":     "00:00",
     "snapshot_min_minutes": 5,
+    "button_visibility":    "All",
 }
-# Helper to return a truly fresh, default state.
-def build_default_state():
+
+
+@dataclass
+class Settings:
+    """All user-configurable settings as a typed, dot-accessible object."""
+    theme:                str  = "Cupertino Light"
+    size:                 str  = "Regular"
+    font:                 str  = "Calibri"
+    label_align:          str  = "Left"
+    client_separators:    bool = True
+    show_group_count:     bool = True
+    show_group_time:      bool = True
+    always_on_top:        bool = True
+    confirm_delete:       bool = True
+    confirm_reset:        bool = True
+    daily_reset_enabled:  bool = False
+    daily_reset_time:     str  = "00:00"
+    snapshot_min_minutes: int  = 5
+    button_visibility:    str  = "All"
+
+    @classmethod
+    def from_dict(cls, d: dict) -> "Settings":
+        return cls(**{k: d.get(k, v) for k, v in _SETTINGS_DEFAULTS.items()})
+
+    def to_dict(self) -> dict:
+        return dataclasses.asdict(self)
+
+
+# ---------------------------------------------------------------------------
+# AppState — runtime holder for the full session state
+# ---------------------------------------------------------------------------
+
+class AppState:
+    """All runtime app state loaded from state.json.
+
+    Owns settings (typed), layout rows (live list), collapsed groups (live
+    set), session start, and the raw tracked_times needed to reconstruct
+    TimerState objects in MainWindow.
+
+    TimerState objects themselves live in MainWindow.timers — pass them to
+    serialize() / save() when persisting.
+    """
+
+    def __init__(
+        self,
+        settings: Settings,
+        rows: list,
+        collapsed_groups: set,
+        session_start: datetime,
+        tracked_times: dict,
+    ):
+        self.settings        = settings
+        self.rows            = rows            # live list — mutated in place by MainWindow
+        self.collapsed_groups = collapsed_groups  # live set
+        self.session_start   = session_start
+        self.tracked_times   = tracked_times  # used only during MainWindow.__init__
+
+    @classmethod
+    def load(cls) -> "AppState":
+        """Load from disk and return a populated AppState."""
+        raw      = load_state()
+        settings = Settings.from_dict(raw.get("settings", {}))
+        layout   = raw.get("layout", {})
+        rows     = list(layout.get("rows", []))
+        collapsed = set(layout.get("collapsed_groups", []))
+        session  = raw.get("session", {})
+        try:
+            start = datetime.fromisoformat(session.get("start", now_iso()))
+        except (ValueError, TypeError):
+            start = datetime.now().astimezone()
+        tracked = session.get("tracked_times", {})
+        return cls(settings, rows, collapsed, start, tracked)
+
+    def serialize(self, timers: dict) -> dict:
+        """Build the full state dict from current live data."""
+        tracked = {}
+        for rid, ts in timers.items():
+            ts.freeze()
+            entry = {"elapsed": ts.elapsed}
+            if ts.running and ts.started_at:
+                entry["running_since"] = ts.started_at.isoformat()
+            tracked[str(rid)] = entry
+        return {
+            "meta": {
+                "schema_version":      _SCHEMA_VERSION,
+                "saved_at":            now_iso(),
+                "is_completed_session": False,
+            },
+            "layout": {
+                "rows":             list(self.rows),
+                "collapsed_groups": list(self.collapsed_groups),
+            },
+            "settings": self.settings.to_dict(),
+            "session": {
+                "start":         self.session_start.isoformat(),
+                "tracked_times": tracked,
+            },
+        }
+
+    def save(self, timers: dict) -> dict:
+        """Serialize and write state to disk. Returns the state dict."""
+        state = self.serialize(timers)
+        save_state(state)
+        return state
+
+
+# ---------------------------------------------------------------------------
+# Low-level load / save functions (also used by AppState internally)
+# ---------------------------------------------------------------------------
+
+def build_default_state() -> dict:
+    """Construct a fresh empty state dict."""
     return {
         "meta": {
-            "schema_version": 1,
-            "saved_at": now_iso(),
+            "schema_version":       _SCHEMA_VERSION,
+            "saved_at":             now_iso(),
             "is_completed_session": False,
         },
         "layout": {
-            "rows": [],
+            "rows":             [],
             "collapsed_groups": [],
         },
         "settings": dict(_SETTINGS_DEFAULTS),
         "session": {
-            "start": now_iso(),
+            "start":         now_iso(),
             "tracked_times": {},
         },
     }
 
-#endregion === Helpers and Paths ===
 
-#region === Saving and Loading State ===
-
-# Loads the current unified state from PATHS.current / state.json, ensuring the schema is valid and handling
-# default fallbacks.
-def load_state():
+def load_state() -> dict:
+    """Load unified state from state.json, migrating or defaulting as needed."""
     try:
-        # If the save doesn't yet exist, we check if there's an old ClientTimer1 install to migrate from. If so,
-        # it gets built using those clients/sizing. Otherwise, a full fresh default state is built.
         if not STATE_PATH.exists():
             state = build_default_state()
             if _OLD_CONFIG.exists():
-                migration_dict = read_old_config(_OLD_CONFIG)
-                for i,timer in enumerate(migration_dict["Timers"]):
+                migration = read_old_config(_OLD_CONFIG)
+                for i, timer in enumerate(migration["Timers"]):
                     state["layout"]["rows"].append({
-                        "rowid": i,
-                        "name": timer,
-                        "type": "timer",
-                        "bg": None
+                        "rowid": i, "name": timer, "type": "timer", "bg": None,
                     })
-                state["settings"]["size"] = migration_dict["Size"]
-                state["settings"]["theme"] = migration_dict["Theme"]
-                log.info("No existing state.json found in `current`, but a ClientTimer1 config.txt was detected - loading and migrating state dict from previous user configuration.")
+                state["settings"]["size"]  = migration["Size"]
+                state["settings"]["theme"] = migration["Theme"]
+                log.info("Migrated state from ClientTimer1 config.txt.")
             else:
-                log.info("No existing state.json found in `current`, loading fresh state dict.")
+                log.info("No existing state.json; loading fresh state.")
+            save_state(state)
+            return state
+
+        with open(STATE_PATH, "r", encoding="utf-8") as f:
+            state = json.load(f)
+
+        defaulted = set()
+
+        # meta
+        if not isinstance(state.get("meta"), dict):
+            state["meta"] = {}
+            defaulted.add("meta")
+        m = state["meta"]
+        if not isinstance(m.get("schema_version"), int):
+            m["schema_version"] = _SCHEMA_VERSION
+            defaulted.add("meta.schema_version")
+        if not isinstance(m.get("is_completed_session"), bool):
+            m["is_completed_session"] = False
+            defaulted.add("meta.is_completed_session")
+
+        # layout
+        if not isinstance(state.get("layout"), dict):
+            state["layout"] = {"rows": [], "collapsed_groups": []}
+            defaulted.add("layout")
         else:
-            with open(STATE_PATH, "r", encoding="utf-8") as f:
-                state = json.load(f)
-            defaulted_values = set()
+            lay = state["layout"]
+            if not isinstance(lay.get("rows"), list):
+                lay["rows"] = []
+                defaulted.add("layout.rows")
+            if not isinstance(lay.get("collapsed_groups"), list):
+                lay["collapsed_groups"] = []
+                defaulted.add("layout.collapsed_groups")
 
-            # Validate the meta dict
-            if "meta" not in state or not isinstance(state["meta"], dict):
-                defaulted_values.add("meta")
-                state["meta"] = {}
-            if "schema_version" not in state["meta"] or not isinstance(state["meta"]["schema_version"], int):
-                defaulted_values.add("meta.schema_version")
-                state["meta"]["schema_version"] = _SCHEMA_VERSION
-            if "is_completed_session" not in state["meta"] or not isinstance(state["meta"]["is_completed_session"], bool):
-                defaulted_values.add("meta.is_completed_session")
-                state["meta"]["is_completed_session"] = False
+        # settings — fill any missing keys
+        if not isinstance(state.get("settings"), dict):
+            state["settings"] = dict(_SETTINGS_DEFAULTS)
+            defaulted.add("settings")
+        else:
+            for key, default in _SETTINGS_DEFAULTS.items():
+                if key not in state["settings"]:
+                    state["settings"][key] = default
+                    defaulted.add(f"settings.{key}")
 
-            # Validate the layout dict, default to empty if its missing and treat as an error
-            if "layout" not in state or not isinstance(state["layout"],dict):
-                defaulted_values.add("layout")
-                state["layout"] = {"rows": [], "collapsed_groups": []}
-            # Validate rows and collapsed groups in layout dict.
-            else:
-                if "rows" not in state["layout"] or not isinstance(state["layout"]["rows"],list):
-                    defaulted_values.add("layout.rows")
-                    state["layout"]["rows"] = []
-                if "collapsed_groups" not in state["layout"] or not isinstance(state["layout"]["collapsed_groups"],list):
-                    defaulted_values.add("layout.collapsed_groups")
-                    state["layout"]["collapsed_groups"] = []
+        # session
+        if not isinstance(state.get("session"), dict):
+            state["session"] = {"start": now_iso(), "tracked_times": {}}
+            defaulted.add("session")
+        else:
+            if not isinstance(state["session"].get("tracked_times"), dict):
+                state["session"]["tracked_times"] = {}
+                defaulted.add("session.tracked_times")
 
-            # Validate the settings dict, fill in any necessary defaults
-            if "settings" not in state or not isinstance(state["settings"],dict):
-                defaulted_values.add("settings")
-                state["settings"] = dict(_SETTINGS_DEFAULTS)
-            else:
-                for key, default in _SETTINGS_DEFAULTS.items():
-                    if key not in state["settings"]:
-                        defaulted_values.add(f"settings.{key}")
-                        state["settings"][key] = default
-
-            # Validate the session dict
-            if "session" not in state or not isinstance(state["session"],dict):
-                defaulted_values.add("session")
-                state["session"] = {"start": now_iso(), "tracked_times": {}}
-            # Validate that the tracked_times dict exists within sessions
-            else:
-                if "tracked_times" not in state["session"] or not isinstance(state["session"]["tracked_times"],dict):
-                    defaulted_values.add("session.tracked_times")
-                    state["session"]["tracked_times"] = {}
-
-            # Log results
-            if defaulted_values:
-                log.warning(f"Successfully loaded current state dict from '{STATE_PATH}', but with missing values that were defaulted: {", ".join(sorted(defaulted_values))}")
-            else:
-                log.info(f"Successfully loaded current state dict from '{STATE_PATH}'.")
+        if defaulted:
+            log.warning(
+                f"Loaded '{STATE_PATH}' with missing values defaulted: "
+                f"{', '.join(sorted(defaulted))}"
+            )
+        else:
+            log.info(f"Loaded state from '{STATE_PATH}'.")
         return state
-    # Fall back to a fresh state dict in case of error, but warn in log
+
     except (FileNotFoundError, json.JSONDecodeError, OSError, TypeError):
-        log.warning("Ran into an error while trying to load state.json, falling back to loading a fresh state dict.",exc_info=True)
+        log.warning("Error loading state.json; falling back to fresh state.", exc_info=True)
         return build_default_state()
-# Write the given state to disk under PATHS.current / state.json
-def save_state(state):
+
+
+def save_state(state: dict) -> None:
+    """Write state dict to disk, refreshing saved_at timestamp."""
     state["meta"]["saved_at"] = now_iso()
     with open(STATE_PATH, "w", encoding="utf-8") as f:
         json.dump(state, f, indent=2)
-    log.info(f"Successfully saved state to '{STATE_PATH}'")
+    log.info(f"Saved state to '{STATE_PATH}'.")
 
-# Saves the given state dict as a completed session, marking it as fully completed, in the PATHS.sessions folder.
-def save_completed_session(state, boundary_dt):
+
+def save_completed_session(state: dict, boundary_dt: datetime) -> str:
+    """Archive a completed session to COMPLETED_DIR. Returns the file path."""
+    import os
+    os.makedirs(COMPLETED_DIR, exist_ok=True)
     completed = copy.deepcopy(state)
     completed["meta"]["is_completed_session"] = True
     completed["meta"]["saved_at"] = now_iso()
     completed["session"]["end"] = boundary_dt.isoformat()
-
-    ts = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
-    final_path = COMPLETED_DIR / f"session_{ts}.json"
-    with open(final_path, "w", encoding="utf-8") as f:
+    ts   = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+    path = COMPLETED_DIR / f"session_{ts}.json"
+    with open(path, "w", encoding="utf-8") as f:
         json.dump(completed, f, indent=2)
-    log.info(f"Saved completed session to '{final_path}'")
-    return str(final_path)
-
-#endregion === Saving and Loading State ===
+    log.info(f"Saved completed session to '{path}'.")
+    return str(path)
