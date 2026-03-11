@@ -1,7 +1,7 @@
 from dataclasses import dataclass
 from PySide6.QtCore import QSize
 from PySide6.QtGui import QFont, QFontMetrics
-from PySide6.QtWidgets import QApplication, QStyle, QStyleOptionButton
+from PySide6.QtWidgets import QPushButton
 
 # A unified UI Blueprint dataclass to share across all UI builders.
 @dataclass
@@ -23,18 +23,6 @@ class UIBlueprint:
     bold_time_font: QFont
     has_mdl2: bool
 
-    @staticmethod
-    def _button_height(text, font):
-        """Calculate QPushButton height without creating a native window."""
-        fm = QFontMetrics(font)
-        opt = QStyleOptionButton()
-        opt.text = text
-        opt.fontMetrics = fm
-        text_size = QSize(fm.horizontalAdvance(text), fm.height())
-        return QApplication.style().sizeFromContents(
-            QStyle.CT_PushButton, opt, text_size
-        ).height()
-
     # Builds the context from current settings.
     @staticmethod
     def compute(theme, size, font_family, rows, has_mdl2):
@@ -46,13 +34,19 @@ class UIBlueprint:
         time_font = QFont(font_family, size["time"])
         action_font = QFont(font_family, size["action"])
 
-        # Get Column-0 reference size (square) — pure calculation, no native window
-        _h = UIBlueprint._button_height("\u2261", action_font)
+        # Get Column-0 reference size (square) by actually instantiating and measuring it briefly
+        _ref = QPushButton("\u2261")
+        _ref.setFont(action_font)
+        _h = _ref.sizeHint().height()
         col0_size = QSize(_h, _h)
+        _ref.deleteLater()
 
-        # Get Column-5 reference size (square) — pure calculation, no native window
-        _hx = UIBlueprint._button_height("X", action_font)
+        # Get Column-5 reference size (square) by actually instantiating and measuring it briefly
+        _ref_x = QPushButton("X")
+        _ref_x.setFont(action_font)
+        _hx = _ref_x.sizeHint().height()
         col5_size = QSize(_hx, _hx)
+        _ref_x.deleteLater()
 
         start_min_w = QFontMetrics(time_font).horizontalAdvance("Start") + 20
 
