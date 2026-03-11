@@ -87,7 +87,7 @@ class DragController:
         h.setMinimumSize(0, 0)
         h.setMaximumSize(16777215, 16777215)
         h._rebuild_rows()
-        QTimer.singleShot(0, h.adjustSize)
+        h.adjustSize()
 
     def handle_event(self, obj, event):
         """Handle a QEvent during an active drag. Returns True if consumed."""
