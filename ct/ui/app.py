@@ -96,12 +96,6 @@ class MainWindow(QMainWindow):
         self._grid.setContentsMargins(0, 0, 0, 0)
         self._main_lay.addWidget(self._grid_widget)
 
-        # Hidden widget used as temporary parent during widget construction.
-        # Prevents top-level HWND creation (no ghost windows) while keeping
-        # new widgets invisible until addWidget() reparents them (no flicker).
-        self._factory_parent = QWidget(self)
-        self._factory_parent.hide()
-
         self._apply_style()
         self._rebuild_rows()
         self.adjustSize()
@@ -175,8 +169,6 @@ class MainWindow(QMainWindow):
 
     def _rebuild_rows(self):
         """Tear down and recreate the entire grid: client rows + footer."""
-        self.setUpdatesEnabled(False)
-
         self._widgets.clear()
 
         while self._grid.count():
@@ -195,7 +187,7 @@ class MainWindow(QMainWindow):
         blueprint = UIBlueprint.compute(t, s, ss.font, self._state.rows, self._has_mdl2)
 
         if not self._state.rows:
-            lbl = QLabel("No clients. Add one to begin!", self._factory_parent)
+            lbl = QLabel("No clients. Add one to begin!")
             lbl.setFont(QFont(ss.font, s["label"]))
             lbl.setAlignment(Qt.AlignCenter)
             self._grid.addWidget(lbl)
@@ -241,8 +233,7 @@ class MainWindow(QMainWindow):
                     total = self._group_total_time(rid)
 
                     row_container, widget_dict = RowFactory.separator(
-                        blueprint=blueprint, parent=self._factory_parent,
-                        rid=rid, row=row,
+                        blueprint=blueprint, rid=rid, row=row,
                         children=children, total_time=total,
                         is_dragging=self._drag.dragging_rid == rid,
                         collapsed=collapsed, has_running=has_running,
@@ -258,8 +249,7 @@ class MainWindow(QMainWindow):
 
                     timer_state = self.timers[rid]
                     row_container, widget_dict = RowFactory.timer(
-                        blueprint=blueprint, parent=self._factory_parent,
-                        rid=rid, row=row, state=timer_state,
+                        blueprint=blueprint, rid=rid, row=row, state=timer_state,
                         shift_held=self._shift_held, label_align=ss.label_align,
                         button_visibility=ss.button_visibility,
                         is_child=is_child,
@@ -294,15 +284,14 @@ class MainWindow(QMainWindow):
 
         # Footer separator
         if self._state.rows:
-            sep = QWidget(self._factory_parent)
+            sep = QWidget()
             sep.setFixedHeight(2)
             sep.setStyleSheet(f"background-color: {t['separator']};")
             self._grid.addWidget(sep)
 
         # Footer
         footer, fw = RowFactory.footer(
-            blueprint=blueprint, parent=self._factory_parent,
-            rearranging=self._rearranging,
+            blueprint=blueprint, rearranging=self._rearranging,
             on_rearrange=self._on_rearrange_toggle,
             on_add=self._on_add,
             on_add_group=self._on_add_group,
@@ -317,7 +306,6 @@ class MainWindow(QMainWindow):
         self._grid.addWidget(footer)
 
 
-        self.setUpdatesEnabled(True)
         QTimer.singleShot(0, self._sync_footer_heights)
 
     # ------------------------------------------------------------------ #
