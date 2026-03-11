@@ -1,7 +1,8 @@
 import ctypes
 import re
-import sys
 import time
+import sys
+from pathlib import Path
 from datetime import datetime, timedelta
 from PySide6.QtCore import Qt, QEvent, QTimer
 from PySide6.QtGui import QColor, QFont, QFontDatabase, QIcon
@@ -30,6 +31,7 @@ from ct.ui.row_factory import RowFactory
 from ct.util import format_time
 
 _SANITIZE = re.compile(r"[^a-zA-Z0-9\s'.]+")
+
 
 
 # ---------------------------------------------------------------------------
@@ -94,6 +96,12 @@ class MainWindow(QMainWindow):
         self._grid.setContentsMargins(0, 0, 0, 0)
         self._main_lay.addWidget(self._grid_widget)
 
+        # Hidden widget used as temporary parent during widget construction.
+        # Prevents top-level HWND creation (no ghost windows) while keeping
+        # new widgets invisible until addWidget() reparents them (no flicker).
+        self._factory_parent = QWidget(self)
+        self._factory_parent.hide()
+
         self._apply_style()
         self._rebuild_rows()
         self.adjustSize()
@@ -103,6 +111,7 @@ class MainWindow(QMainWindow):
         self._timer  = QTimer(self)
         self._timer.timeout.connect(self._tick)
         self._timer.start(1000)
+
 
     # ------------------------------------------------------------------ #
     #  Style                                                               #
@@ -166,6 +175,8 @@ class MainWindow(QMainWindow):
 
     def _rebuild_rows(self):
         """Tear down and recreate the entire grid: client rows + footer."""
+        self.setUpdatesEnabled(False)
+
         self._widgets.clear()
 
         while self._grid.count():
@@ -184,7 +195,7 @@ class MainWindow(QMainWindow):
         blueprint = UIBlueprint.compute(t, s, ss.font, self._state.rows, self._has_mdl2)
 
         if not self._state.rows:
-            lbl = QLabel("No clients. Add one to begin!")
+            lbl = QLabel("No clients. Add one to begin!", self._factory_parent)
             lbl.setFont(QFont(ss.font, s["label"]))
             lbl.setAlignment(Qt.AlignCenter)
             self._grid.addWidget(lbl)
@@ -230,7 +241,8 @@ class MainWindow(QMainWindow):
                     total = self._group_total_time(rid)
 
                     row_container, widget_dict = RowFactory.separator(
-                        blueprint=blueprint, rid=rid, row=row,
+                        blueprint=blueprint, parent=self._factory_parent,
+                        rid=rid, row=row,
                         children=children, total_time=total,
                         is_dragging=self._drag.dragging_rid == rid,
                         collapsed=collapsed, has_running=has_running,
@@ -246,7 +258,8 @@ class MainWindow(QMainWindow):
 
                     timer_state = self.timers[rid]
                     row_container, widget_dict = RowFactory.timer(
-                        blueprint=blueprint, rid=rid, row=row, state=timer_state,
+                        blueprint=blueprint, parent=self._factory_parent,
+                        rid=rid, row=row, state=timer_state,
                         shift_held=self._shift_held, label_align=ss.label_align,
                         button_visibility=ss.button_visibility,
                         is_child=is_child,
@@ -281,14 +294,15 @@ class MainWindow(QMainWindow):
 
         # Footer separator
         if self._state.rows:
-            sep = QWidget()
+            sep = QWidget(self._factory_parent)
             sep.setFixedHeight(2)
             sep.setStyleSheet(f"background-color: {t['separator']};")
             self._grid.addWidget(sep)
 
         # Footer
         footer, fw = RowFactory.footer(
-            blueprint=blueprint, rearranging=self._rearranging,
+            blueprint=blueprint, parent=self._factory_parent,
+            rearranging=self._rearranging,
             on_rearrange=self._on_rearrange_toggle,
             on_add=self._on_add,
             on_add_group=self._on_add_group,
@@ -302,6 +316,8 @@ class MainWindow(QMainWindow):
         self._cfg_btn        = fw["cfg_btn"]
         self._grid.addWidget(footer)
 
+
+        self.setUpdatesEnabled(True)
         QTimer.singleShot(0, self._sync_footer_heights)
 
     # ------------------------------------------------------------------ #
@@ -425,7 +441,7 @@ class MainWindow(QMainWindow):
         self._save_state()
         self._try_snapshot(reason="layout_change", priority="medium")
         self._rebuild_rows()
-        QTimer.singleShot(0, self.adjustSize)
+        self.adjustSize()
 
     def _on_group_toggle(self, rowid):
         if rowid in self._state.collapsed_groups:
@@ -434,7 +450,7 @@ class MainWindow(QMainWindow):
             self._state.collapsed_groups.add(rowid)
         self._save_state()
         self._rebuild_rows()
-        QTimer.singleShot(0, self.adjustSize)
+        self.adjustSize()
 
     def _on_remove(self, rowid):
         if QApplication.keyboardModifiers() & Qt.ShiftModifier:
@@ -464,7 +480,7 @@ class MainWindow(QMainWindow):
             self._save_state()
             self._try_snapshot(reason="layout_change", priority="medium")
             self._rebuild_rows()
-            QTimer.singleShot(0, self.adjustSize)
+            self.adjustSize()
 
     def _on_rearrange_toggle(self):
         self._rearranging = not self._rearranging
@@ -575,7 +591,7 @@ class MainWindow(QMainWindow):
             self._save_state()
             self._try_snapshot(reason="layout_change", priority="medium")
             self._rebuild_rows()
-            QTimer.singleShot(0, self.adjustSize)
+            self.adjustSize()
 
     @staticmethod
     def _parse_time_input(text):
@@ -597,42 +613,66 @@ class MainWindow(QMainWindow):
 
     def _on_config(self):
         dlg = ConfigDialog(self, self._state.settings.to_dict(), on_reset=self._reset_all)
-        if dlg.exec() == QDialog.Accepted and dlg.style_changed:
-            old_aot = self._state.settings.always_on_top
+        if dlg.exec() != QDialog.Accepted:
+            return
+        if dlg.restore_path:
+            self._restore_from_snapshot(dlg.restore_path)
+            return
+        if not dlg.style_changed:
+            return
 
-            s = self._state.settings
-            s.theme                = dlg.chosen_theme
-            s.size                 = dlg.chosen_size
-            s.font                 = dlg.chosen_font
-            s.label_align          = dlg.chosen_label_align
-            s.client_separators    = dlg.chosen_client_separators
-            s.show_group_count     = dlg.chosen_show_group_count
-            s.show_group_time      = dlg.chosen_show_group_time
-            s.always_on_top        = dlg.chosen_always_on_top
-            s.confirm_delete       = dlg.chosen_confirm_delete
-            s.confirm_reset        = dlg.chosen_confirm_reset
-            s.daily_reset_enabled  = dlg.chosen_daily_reset_enabled
-            s.daily_reset_time     = dlg.chosen_daily_reset_time
-            s.snapshot_min_minutes = dlg.chosen_snapshot_min_minutes
-            s.button_visibility    = dlg.chosen_button_visibility
+        old_aot = self._state.settings.always_on_top
 
-            self._save_state()
-            self._try_snapshot(reason="layout_change", priority="high")
+        s = self._state.settings
+        s.theme                = dlg.chosen_theme
+        s.size                 = dlg.chosen_size
+        s.font                 = dlg.chosen_font
+        s.label_align          = dlg.chosen_label_align
+        s.client_separators    = dlg.chosen_client_separators
+        s.show_group_count     = dlg.chosen_show_group_count
+        s.show_group_time      = dlg.chosen_show_group_time
+        s.always_on_top        = dlg.chosen_always_on_top
+        s.confirm_delete       = dlg.chosen_confirm_delete
+        s.confirm_reset        = dlg.chosen_confirm_reset
+        s.daily_reset_enabled  = dlg.chosen_daily_reset_enabled
+        s.daily_reset_time     = dlg.chosen_daily_reset_time
+        s.snapshot_min_minutes = dlg.chosen_snapshot_min_minutes
+        s.button_visibility    = dlg.chosen_button_visibility
 
-            self._apply_style()
-            self._rebuild_rows()
-            QTimer.singleShot(0, self.adjustSize)
+        self._save_state()
+        self._try_snapshot(reason="layout_change", priority="high")
 
-            if self._state.settings.always_on_top != old_aot:
-                if sys.platform == "win32":
-                    hwnd = int(self.winId())
-                    flag = -1 if self._state.settings.always_on_top else -2
-                    ctypes.windll.user32.SetWindowPos(
-                        hwnd, flag, 0, 0, 0, 0, 0x0013)
-                else:
-                    self.setWindowFlag(
-                        Qt.WindowStaysOnTopHint, self._state.settings.always_on_top)
-                    self.show()
+        self._apply_style()
+        self._rebuild_rows()
+        self.adjustSize()
+
+        if self._state.settings.always_on_top != old_aot:
+            if sys.platform == "win32":
+                hwnd = int(self.winId())
+                flag = -1 if self._state.settings.always_on_top else -2
+                ctypes.windll.user32.SetWindowPos(
+                    hwnd, flag, 0, 0, 0, 0, 0x0013)
+            else:
+                self.setWindowFlag(
+                    Qt.WindowStaysOnTopHint, self._state.settings.always_on_top)
+                self.show()
+
+    def _restore_from_snapshot(self, path: Path):
+        self._stop_all()
+        self._state = AppState.load(path)
+        self._next_rowid = max(
+            (r["rowid"] for r in self._state.rows), default=-1) + 1
+        self.timers = {}
+        for row in self._state.rows:
+            if row["type"] == "timer":
+                rid = row["rowid"]
+                tt  = self._state.tracked_times.get(str(rid), {})
+                # Don't restore running_since — timers start stopped after restore
+                self.timers[rid] = TimerState(row["name"], elapsed=tt.get("elapsed", 0.0))
+        self._state.save(self.timers)
+        self._apply_style()
+        self._rebuild_rows()
+        self.adjustSize()
 
     # ------------------------------------------------------------------ #
     #  Timer control                                                       #

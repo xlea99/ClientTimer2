@@ -21,6 +21,7 @@ class RowFactory:
     @staticmethod
     # Given a UIBlueprint object and information about a row, this method builds it into a single separator row.
     def separator(blueprint: UIBlueprint,
+                            parent: QWidget,
                             rid: int,
                             row: dict,
                             children: list,
@@ -43,8 +44,8 @@ class RowFactory:
         else:
             row_bg = row.get("bg") or blueprint.theme["group_header_bg"]
 
-        # Build the row's contaner
-        row_container = QWidget()
+        # Build the row's container (parented to avoid top-level HWND creation)
+        row_container = QWidget(parent)
         row_container.setObjectName("rowBg")
         row_container.setStyleSheet(
             f"#rowBg {{ background-color: {row_bg}; {margin_css} }}")
@@ -53,7 +54,7 @@ class RowFactory:
         row_container_layout.setSpacing(blueprint.h_spacing)
 
         # Col 0: toggle
-        toggle_btn = QPushButton("\u25B8" if collapsed else "\u25BE")
+        toggle_btn = QPushButton("\u25B8" if collapsed else "\u25BE", row_container)
         toggle_btn.setFont(blueprint.action_font)
         toggle_btn.setFixedSize(blueprint.col0_size)
         toggle_btn.setStyleSheet("padding: 0px;")
@@ -61,7 +62,7 @@ class RowFactory:
         row_container_layout.addWidget(toggle_btn)
 
         # Col 1: name
-        name_lbl = QLabel(row["name"])
+        name_lbl = QLabel(row["name"], row_container)
         grp_name_font = QFont(blueprint.font_family, blueprint.size["label"])
         grp_name_font.setBold(has_running)
         name_lbl.setFont(grp_name_font)
@@ -72,7 +73,7 @@ class RowFactory:
         row_container_layout.addWidget(name_lbl)
 
         # Col 2: child count
-        count_lbl = QLabel(f"({len(children)})")
+        count_lbl = QLabel(f"({len(children)})", row_container)
         count_lbl.setFont(blueprint.action_font)
         count_lbl.setAlignment(Qt.AlignCenter)
         count_lbl.setStyleSheet(f"color: {blueprint.theme["group_header_text"]};")
@@ -81,7 +82,7 @@ class RowFactory:
         row_container_layout.addWidget(count_lbl)
 
         # Col 3: aggregate time
-        time_lbl = QLabel(format_time(total_time))
+        time_lbl = QLabel(format_time(total_time), row_container)
         grp_time_font = QFont(blueprint.font_family, blueprint.size["time"])
         if has_running:
             grp_time_font.setBold(True)
@@ -94,11 +95,11 @@ class RowFactory:
         row_container_layout.addWidget(time_lbl)
 
         # Col 4: spacer
-        spacer = QLabel("")
+        spacer = QLabel("", row_container)
         row_container_layout.addWidget(spacer)
 
         # Col 5: delete
-        x_btn = QPushButton("X")
+        x_btn = QPushButton("X", row_container)
         x_btn.setFont(blueprint.action_font)
         x_btn.setFixedWidth(blueprint.col5_size.width())
         x_btn.clicked.connect(lambda _=False: on_remove(rid))
@@ -116,6 +117,7 @@ class RowFactory:
     @staticmethod
     # Given a UIBlueprint object and information about a row, this method builds it into a single timer row.
     def timer(blueprint: UIBlueprint,
+                        parent: QWidget,
                         rid: int,
                         row: dict,
                         state: TimerState,
@@ -143,7 +145,7 @@ class RowFactory:
             row_bg = row.get("bg") or blueprint.theme["bg"]
 
         margin_css = (f"margin-left: {blueprint.indent_px - 3}px;" if is_child else "")
-        rc = QWidget()
+        rc = QWidget(parent)
         rc.setObjectName("rowBg")
         border_css = (f"border-bottom: 1px solid {blueprint.theme['row_separator']};"
                       if draw_separator_line else "")
@@ -154,7 +156,7 @@ class RowFactory:
         rc_lay.setSpacing(blueprint.h_spacing)
 
         # Col 0: bullet
-        bullet = QLabel("\u2022" if state.running else "")
+        bullet = QLabel("\u2022" if state.running else "", rc)
         bullet.setFont(blueprint.action_font)
         bullet.setAlignment(Qt.AlignCenter)
         bullet.setFixedSize(blueprint.col0_size)
@@ -162,7 +164,7 @@ class RowFactory:
         rc_lay.addWidget(bullet)
 
         # Col 1: name
-        name_lbl = QLabel(row["name"])
+        name_lbl = QLabel(row["name"], rc)
         name_lbl.setFont(QFont(blueprint.font_family, blueprint.size["label"]))
         name_lbl.setAlignment(_ALIGN.get(label_align, Qt.AlignCenter))
         name_lbl.setFixedWidth(blueprint.min_name_w)
@@ -170,29 +172,30 @@ class RowFactory:
         rc_lay.addWidget(name_lbl)
 
         # Col 2: Start / Stop
-        start_btn = QPushButton("Add" if shift_held else "Start")
-        start_btn.setFont(blueprint.time_font)
-        start_btn.setMinimumWidth(blueprint.start_min_w)
-        start_btn.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
-        start_btn.clicked.connect(lambda _=False: on_start(rid))
-
-        stop_btn = QPushButton("Stop")
-        stop_btn.setFont(blueprint.time_font)
-        stop_btn.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
-        stop_btn.clicked.connect(lambda _=False: on_stop(rid))
-
-        ss_container = QWidget()
+        ss_container = QWidget(rc)
         ss_container.setObjectName("ssCt")
         ss_container.setStyleSheet("#ssCt { background: transparent; }")
         ss_lay = QHBoxLayout(ss_container)
         ss_lay.setContentsMargins(0, 0, 0, 0)
         ss_lay.setSpacing(blueprint.btn_spacing)
+
+        start_btn = QPushButton("Add" if shift_held else "Start", ss_container)
+        start_btn.setFont(blueprint.time_font)
+        start_btn.setMinimumWidth(blueprint.start_min_w)
+        start_btn.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
+        start_btn.clicked.connect(lambda _=False: on_start(rid))
         ss_lay.addWidget(start_btn)
+
+        stop_btn = QPushButton("Stop", ss_container)
+        stop_btn.setFont(blueprint.time_font)
+        stop_btn.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
+        stop_btn.clicked.connect(lambda _=False: on_stop(rid))
         ss_lay.addWidget(stop_btn)
+
         rc_lay.addWidget(ss_container)
 
         # Col 3: time
-        time_lbl = QLabel(format_time(state.current_elapsed))
+        time_lbl = QLabel(format_time(state.current_elapsed), rc)
         time_lbl.setFont(blueprint.time_font)
         time_lbl.setAlignment(Qt.AlignCenter)
         time_lbl.setFixedWidth(blueprint.min_time_w)
@@ -200,29 +203,30 @@ class RowFactory:
         rc_lay.addWidget(time_lbl)
 
         # Col 4: -5/+5
-        minus_btn = QPushButton("-1" if shift_held else "-5")
-        minus_btn.setFont(blueprint.action_font)
-        minus_btn.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
-        minus_btn.clicked.connect(lambda _=False: on_adjust(rid, -1))
-
-        plus_btn = QPushButton("+1" if shift_held else "+5")
-        plus_btn.setFont(blueprint.action_font)
-        plus_btn.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
-        plus_btn.clicked.connect(lambda _=False: on_adjust(rid, 1))
-
-        adj_container = QWidget()
+        adj_container = QWidget(rc)
         adj_container.setObjectName("adjCt")
         adj_container.setStyleSheet("#adjCt { background: transparent; }")
         adj_lay = QHBoxLayout(adj_container)
         adj_lay.setContentsMargins(0, 0, 0, 0)
         adj_lay.setSpacing(blueprint.btn_spacing)
+
+        minus_btn = QPushButton("-1" if shift_held else "-5", adj_container)
+        minus_btn.setFont(blueprint.action_font)
+        minus_btn.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
+        minus_btn.clicked.connect(lambda _=False: on_adjust(rid, -1))
         adj_lay.addWidget(minus_btn)
+
+        plus_btn = QPushButton("+1" if shift_held else "+5", adj_container)
+        plus_btn.setFont(blueprint.action_font)
+        plus_btn.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
+        plus_btn.clicked.connect(lambda _=False: on_adjust(rid, 1))
         adj_lay.addWidget(plus_btn)
+
         adj_container.setVisible(button_visibility != "None")
         rc_lay.addWidget(adj_container)
 
         # Col 5: X / 0
-        x_btn = QPushButton("0" if shift_held else "X")
+        x_btn = QPushButton("0" if shift_held else "X", rc)
         x_btn.setFont(blueprint.action_font)
         x_btn.setFixedWidth(blueprint.col5_size.width())
         x_btn.clicked.connect(lambda _=False: on_remove(rid))
@@ -240,7 +244,7 @@ class RowFactory:
 
     @staticmethod
     # Given a UIBlueprint, simply builds the footer bar for the bottom of the main app view.
-    def footer(blueprint: UIBlueprint, rearranging: bool,
+    def footer(blueprint: UIBlueprint, parent: QWidget, rearranging: bool,
                      on_rearrange: Callable[...,Any],
                      on_add: Callable[...,Any],
                      on_add_group: Callable[...,Any],
@@ -257,8 +261,16 @@ class RowFactory:
             unlock_char = "\u25A1"
             lock_font = footer_font
 
+        # Build footer container first so all children can be parented to it
+        footer = QWidget(parent)
+        footer.setObjectName("footer")
+        footer.setStyleSheet("#footer { background: transparent; }")
+        f_lay = QHBoxLayout(footer)
+        f_lay.setContentsMargins(0, 0, 0, 0)
+        f_lay.setSpacing(blueprint.h_spacing)
+
         # Build the rearrange/lock button.
-        rearrange_btn = QPushButton(unlock_char if rearranging else lock_char)
+        rearrange_btn = QPushButton(unlock_char if rearranging else lock_char, footer)
         rearrange_btn.setFont(lock_font)
         rearrange_btn.setFixedSize(blueprint.col0_size)
         rearrange_btn.setStyleSheet("padding: 0px;")
@@ -267,51 +279,45 @@ class RowFactory:
             rearrange_btn.setToolTip("Lock UI layout")
         else:
             rearrange_btn.setToolTip("Unlock UI layout (drag rows to rearrange)")
+        f_lay.addWidget(rearrange_btn)
 
-        add_btn = QPushButton("Add Client")
-        add_btn.setFont(footer_font)
-        add_btn.clicked.connect(on_add)
-        add_btn.setToolTip("Add a new client timer to UI")
-
-        add_group_btn = QPushButton("Add Separator")
-        add_group_btn.setFont(footer_font)
-        add_group_btn.clicked.connect(on_add_group)
-        add_group_btn.setToolTip("Add a new separator timer to UI")
-
-        add_btns = QWidget()
+        add_btns = QWidget(footer)
         add_btns.setObjectName("addBtns")
         add_btns.setStyleSheet("#addBtns { background: transparent; }")
         add_btns_lay = QHBoxLayout(add_btns)
         add_btns_lay.setContentsMargins(0, 0, 0, 0)
         add_btns_lay.setSpacing(blueprint.btn_spacing)
+
+        add_btn = QPushButton("Add Client", add_btns)
+        add_btn.setFont(footer_font)
+        add_btn.clicked.connect(on_add)
+        add_btn.setToolTip("Add a new client timer to UI")
         add_btns_lay.addWidget(add_btn)
+
+        add_group_btn = QPushButton("Add Separator", add_btns)
+        add_group_btn.setFont(footer_font)
+        add_group_btn.clicked.connect(on_add_group)
+        add_group_btn.setToolTip("Add a new separator timer to UI")
         add_btns_lay.addWidget(add_group_btn)
 
-        add_input = QLineEdit()
+        f_lay.addWidget(add_btns)
+
+        add_input = QLineEdit(footer)
         add_input.setFont(footer_font)
         add_input.setPlaceholderText("Client name...")
         add_input.returnPressed.connect(on_add_input_return)
+        f_lay.addWidget(add_input, 1)
 
         if blueprint.has_mdl2:
-            cfg_btn = QPushButton("\uE713")
+            cfg_btn = QPushButton("\uE713", footer)
             cfg_btn.setFont(QFont("Segoe MDL2 Assets", blueprint.size["action"]))
         else:
-            cfg_btn = QPushButton("\u2699")
+            cfg_btn = QPushButton("\u2699", footer)
             cfg_btn.setFont(footer_font)
         cfg_btn.setFixedSize(blueprint.col5_size)
         cfg_btn.setStyleSheet("padding: 0px;")
         cfg_btn.clicked.connect(on_config)
         cfg_btn.setToolTip("Settings")
-
-        footer = QWidget()
-        footer.setObjectName("footer")
-        footer.setStyleSheet("#footer { background: transparent; }")
-        f_lay = QHBoxLayout(footer)
-        f_lay.setContentsMargins(0, 0, 0, 0)
-        f_lay.setSpacing(blueprint.h_spacing)
-        f_lay.addWidget(rearrange_btn)
-        f_lay.addWidget(add_btns)
-        f_lay.addWidget(add_input, 1)
         f_lay.addWidget(cfg_btn)
 
         footer_widgets = {
