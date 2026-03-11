@@ -1,24 +1,34 @@
 """Configuration dialog for Client Timer — tabbed sidebar layout."""
 
+import json
+import re
+from datetime import datetime
+from pathlib import Path
 from PySide6.QtCore import Qt, QTime, QUrl
 from PySide6.QtGui import QColor, QDesktopServices, QFont, QFontMetrics
 from PySide6.QtWidgets import (
+    QAbstractItemView,
     QAbstractSpinBox,
     QComboBox,
     QDialog,
     QFrame,
     QHBoxLayout,
+    QHeaderView,
     QLabel,
     QListWidget,
+    QMessageBox,
     QPushButton,
     QSpinBox,
     QStackedWidget,
+    QTableWidget,
+    QTableWidgetItem,
     QTimeEdit,
     QVBoxLayout,
     QWidget,
 )
 from ct.common.setup import PATHS
 from ct.ui.theme import THEMES, SIZES, FONTS
+from ct.util import format_time
 
 # Simple tabbed settings dialog with a left sidebar for different categories. Opens when the user clicks the little
 # gear icon in main app
@@ -45,6 +55,7 @@ class ConfigDialog(QDialog):
         self.chosen_daily_reset_enabled = cfg.get("daily_reset_enabled", False)
         self.chosen_daily_reset_time = cfg.get("daily_reset_time", "00:00")
         self.chosen_button_visibility = cfg.get("button_visibility", "All")
+        self.restore_path = None
         self.style_changed = False
 
         # --- Layout ---
@@ -196,19 +207,140 @@ class ConfigDialog(QDialog):
         reset_btn = QPushButton("Reset All Times")
         reset_btn.setFont(QFont("Calibri", 11))
         reset_btn.clicked.connect(on_reset)
-        folder_btn = QPushButton("Open Snapshot Folder")
-        folder_btn.setFont(QFont("Calibri", 11))
-        folder_btn.clicked.connect(
-            lambda: QDesktopServices.openUrl(
-                QUrl.fromLocalFile(str(PATHS.snapshots)))
-        )
+        browse_btn = QPushButton("Browse Snapshots")
+        browse_btn.setFont(QFont("Calibri", 11))
+        browse_btn.clicked.connect(self._toggle_snapshot_browser)
         btn_row.addWidget(reset_btn)
         btn_row.addStretch()
-        btn_row.addWidget(folder_btn)
+        btn_row.addWidget(browse_btn)
         lay.addLayout(btn_row)
+
+        # Snapshot browser — hidden until Browse Snapshots is clicked
+        self._snap_paths = []
+        self._snap_browser = QFrame()
+        self._snap_browser.setFrameShape(QFrame.Box)
+        self._snap_browser.setFrameShadow(QFrame.Sunken)
+        snap_lay = QVBoxLayout(self._snap_browser)
+        snap_lay.setSpacing(6)
+        snap_lay.setContentsMargins(4, 4, 4, 4)
+
+        self._snap_table = QTableWidget(0, 2)
+        self._snap_table.setHorizontalHeaderLabels(["Snapshot Time", "Age"])
+        self._snap_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.Stretch)
+        self._snap_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeToContents)
+        self._snap_table.verticalHeader().setVisible(False)
+        self._snap_table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self._snap_table.setSelectionMode(QAbstractItemView.SingleSelection)
+        self._snap_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self._snap_table.setMinimumHeight(160)
+        self._snap_table.itemSelectionChanged.connect(self._on_snapshot_selected)
+        snap_lay.addWidget(self._snap_table)
+
+        self._restore_btn = QPushButton("Restore from Snapshot")
+        self._restore_btn.setFont(QFont("Calibri", 11))
+        self._restore_btn.setEnabled(False)
+        self._restore_btn.clicked.connect(self._on_restore_clicked)
+        snap_lay.addWidget(self._restore_btn)
+
+        self._snap_browser.setVisible(False)
+        lay.addWidget(self._snap_browser)
 
         lay.addStretch()
         return page
+
+    # ------------------------------------------------------------------ #
+    #  Snapshot browser                                                    #
+    # ------------------------------------------------------------------ #
+
+    def _toggle_snapshot_browser(self):
+        visible = not self._snap_browser.isVisible()
+        self._snap_browser.setVisible(visible)
+        if visible:
+            self._load_snapshots()
+
+    def _load_snapshots(self):
+        _SNAP_RE = re.compile(r"state_(\d{8}_\d{6})_\d+\.json")
+        now = datetime.now()
+        entries = []
+        try:
+            for path in PATHS.snapshots.iterdir():
+                m = _SNAP_RE.match(path.name)
+                if not m:
+                    continue
+                try:
+                    dt = datetime.strptime(m.group(1), "%Y%m%d_%H%M%S")
+                except ValueError:
+                    continue
+                entries.append((dt, path))
+        except OSError:
+            pass
+        entries.sort(reverse=True)
+
+        self._snap_table.setRowCount(0)
+        self._snap_paths = []
+        for dt, path in entries:
+            row = self._snap_table.rowCount()
+            self._snap_table.insertRow(row)
+            self._snap_paths.append(path)
+
+            time_str = dt.strftime("%Y-%m-%d %H:%M:%S")
+            secs = int((now - dt).total_seconds())
+            if secs < 60:
+                age_str = f"{secs}s ago"
+            elif secs < 3600:
+                age_str = f"{secs // 60}m {secs % 60}s ago"
+            elif secs < 86400:
+                age_str = f"{secs // 3600}h {(secs % 3600) // 60}m ago"
+            else:
+                age_str = f"{secs // 86400}d {(secs % 86400) // 3600}h ago"
+
+            tooltip = self._build_snapshot_tooltip(path)
+            time_item = QTableWidgetItem(time_str)
+            time_item.setToolTip(tooltip)
+            age_item = QTableWidgetItem(age_str)
+            age_item.setToolTip(tooltip)
+            self._snap_table.setItem(row, 0, time_item)
+            self._snap_table.setItem(row, 1, age_item)
+
+        self._restore_btn.setEnabled(False)
+
+    def _build_snapshot_tooltip(self, path: Path) -> str:
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            rows    = data.get("layout", {}).get("rows", [])
+            tracked = data.get("session", {}).get("tracked_times", {})
+            lines = []
+            for row in rows:
+                if row.get("type") != "timer":
+                    continue
+                elapsed = tracked.get(str(row.get("rowid", "")), {}).get("elapsed", 0)
+                lines.append(f"{format_time(int(elapsed))}  {row.get('name', '?')}")
+                if len(lines) >= 12:
+                    break
+            return "\n".join(lines) if lines else "(no timers)"
+        except Exception:
+            return "(could not load snapshot)"
+
+    def _on_snapshot_selected(self):
+        self._restore_btn.setEnabled(bool(self._snap_table.selectedItems()))
+
+    def _on_restore_clicked(self):
+        row = self._snap_table.currentRow()
+        if row < 0 or row >= len(self._snap_paths):
+            return
+        path     = self._snap_paths[row]
+        time_str = self._snap_table.item(row, 0).text()
+        answer = QMessageBox.question(
+            self,
+            "Restore from Snapshot",
+            f"Restore from snapshot taken at:\n{time_str}\n\nThis will overwrite the current state.",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        if answer == QMessageBox.Yes:
+            self.restore_path = path
+            self.accept()
 
     # ------------------------------------------------------------------ #
     #  Daily Reset page                                                    #

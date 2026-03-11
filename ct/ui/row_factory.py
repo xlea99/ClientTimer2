@@ -102,8 +102,8 @@ class RowFactory:
         x_btn.setFont(blueprint.action_font)
         x_btn.setFixedWidth(blueprint.col5_size.width())
         x_btn.clicked.connect(lambda _=False: on_remove(rid))
-        x_btn.setVisible(show_x)
         row_container_layout.addWidget(x_btn)
+        x_btn.setVisible(show_x)
 
         widget_dict = {
             "name": name_lbl, "time": time_lbl,
@@ -218,16 +218,16 @@ class RowFactory:
         adj_lay.setSpacing(blueprint.btn_spacing)
         adj_lay.addWidget(minus_btn)
         adj_lay.addWidget(plus_btn)
-        adj_container.setVisible(button_visibility != "None")
         rc_lay.addWidget(adj_container)
+        adj_container.setVisible(button_visibility != "None")
 
         # Col 5: X / 0
         x_btn = QPushButton("0" if shift_held else "X")
         x_btn.setFont(blueprint.action_font)
         x_btn.setFixedWidth(blueprint.col5_size.width())
         x_btn.clicked.connect(lambda _=False: on_remove(rid))
-        x_btn.setVisible(button_visibility == "All")
         rc_lay.addWidget(x_btn)
+        x_btn.setVisible(button_visibility == "All")
 
         widget_dict = {
             "name": name_lbl, "time": time_lbl,
