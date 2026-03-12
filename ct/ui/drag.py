@@ -255,8 +255,14 @@ class DragController:
             border_css = (f"border-bottom: 1px solid {t['row_separator']};"
                           if needs_sep else "")
 
-            container.setStyleSheet(
-                f"#rowBg {{ background-color: {row_bg}; {margin_css} {border_css} }}")
+            if row["type"] == "separator":
+                group_border = t.get("group_border", row_bg)
+                container.setStyleSheet(
+                    f"#rowBg {{ background-color: {row_bg}; {margin_css}"
+                    f" border: 2px solid {group_border}; }}")
+            else:
+                container.setStyleSheet(
+                    f"#rowBg {{ background-color: {row_bg}; {margin_css} {border_css} }}")
 
             container.show()
             h._grid.insertWidget(insert_idx, container)
