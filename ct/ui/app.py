@@ -4,12 +4,13 @@ import time
 import sys
 from pathlib import Path
 from datetime import datetime, timedelta
-from PySide6.QtCore import Qt, QEvent, QTimer
+from PySide6.QtCore import Qt, QEvent, QTimer, QPropertyAnimation, QEasingCurve
 from PySide6.QtGui import QColor, QFont, QFontDatabase, QIcon
 from PySide6.QtWidgets import (
     QApplication,
     QColorDialog,
     QDialog,
+    QGraphicsOpacityEffect,
     QInputDialog,
     QLabel,
     QMainWindow,
@@ -82,23 +83,42 @@ class MainWindow(QMainWindow):
         self._last_snapshot_time = 0.0
         self._snapshot_debounce  = 10.0  # seconds between non-high-priority snapshots
 
-        # -- Check for missed daily reset at startup --
-        if self._state.settings.daily_reset_enabled:
-            self._check_daily_reset_boundary()
+        # -- Pre-UI startup checks --
+        self._startup_checks()
 
         # -- Build UI skeleton --
         central = QWidget()
         self.setCentralWidget(central)
         self._main_lay = QVBoxLayout(central)
+        self._main_lay.setContentsMargins(0, 0, 0, 0)
 
-        self._grid_widget = QWidget()
-        self._grid = QVBoxLayout(self._grid_widget)
-        self._grid.setContentsMargins(0, 0, 0, 0)
-        self._main_lay.addWidget(self._grid_widget)
+        self._grid_widget = None  # created fresh each _rebuild_rows
+
+        # -- Toast notification bar --
+        self._toast_container = QWidget()
+        self._toast_container.setVisible(False)
+        toast_lay = QVBoxLayout(self._toast_container)
+        toast_lay.setContentsMargins(0, 0, 0, 0)
+        toast_lay.setSpacing(0)
+
+        self._toast = QLabel()
+        self._toast.setAlignment(Qt.AlignCenter)
+        self._toast.setFont(QFont("Calibri", 9))
+        self._toast.setContentsMargins(4, 2, 4, 2)
+        toast_lay.addWidget(self._toast)
+
+        self._toast_opacity = QGraphicsOpacityEffect(self._toast_container)
+        self._toast_container.setGraphicsEffect(self._toast_opacity)
+        self._toast_opacity.setOpacity(1.0)
 
         self._apply_style()
         self._rebuild_rows()
         self.adjustSize()
+
+        # -- Show any pending toast from startup checks --
+        if self._pending_toast:
+            QTimer.singleShot(0, lambda: self.show_toast(self._pending_toast, 6))
+            self._pending_toast = None
 
         # -- Tick timer (1 s) --
         self._tick_n = 0
@@ -106,6 +126,43 @@ class MainWindow(QMainWindow):
         self._timer.timeout.connect(self._tick)
         self._timer.start(1000)
 
+
+    # ------------------------------------------------------------------ #
+    #  Startup checks (runs before UI is built)                            #
+    # ------------------------------------------------------------------ #
+
+    def _startup_checks(self):
+        """All pre-UI initialization: migration, daily reset catch-up, etc."""
+        self._pending_toast = None
+
+        # 1. CT1 migration — data handled in AppState.load(), show user a
+        #    notification if it happened.
+        if self._state.migrated_from_ct1:
+            m = self._state.migrated_from_ct1
+            timers = ", ".join(m.get("Timers", []))
+            QMessageBox.information(
+                self,
+                "Welcome to Client Timer 2",
+                f"Your Client Timer 1 data has been migrated!\n\n"
+                f"Timers: {timers}\n"
+                f"Theme: {m.get('Theme', 'Cupertino Light')}\n"
+                f"Size: {m.get('Size', 'Regular')}",
+            )
+            self._state.migrated_from_ct1 = None
+
+        # 2. Daily reset catch-up — if the app was closed and we missed a
+        #    reset boundary, save the old session and zero out timers.
+        if self._state.settings.daily_reset_enabled:
+            boundary = self._most_recent_reset_boundary()
+            if self._state.session_start < boundary:
+                state = self._save_state()
+                save_completed_session(state, boundary)
+                for ts in self.timers.values():
+                    ts.reset()
+                self._state.session_start = boundary
+                self._save_state()
+                time_str = boundary.strftime("%I:%M %p").lstrip("0")
+                self._pending_toast = f"Session saved and reset at {time_str}"
 
     # ------------------------------------------------------------------ #
     #  Style                                                               #
@@ -171,12 +228,19 @@ class MainWindow(QMainWindow):
         """Tear down and recreate the entire grid: client rows + footer."""
         self._widgets.clear()
 
-        while self._grid.count():
-            item = self._grid.takeAt(0)
-            w = item.widget()
-            if w:
-                w.hide()
-                w.deleteLater()
+        if self._grid_widget is not None:
+            self._main_lay.removeWidget(self._grid_widget)
+            self._grid_widget.setParent(None)
+            self._grid_widget.deleteLater()
+
+        # Remove toast from layout before re-adding (keeps it at the bottom)
+        self._main_lay.removeWidget(self._toast_container)
+
+        self._grid_widget = QWidget()
+        self._grid = QVBoxLayout(self._grid_widget)
+        self._grid.setContentsMargins(0, 0, 0, 0)
+        self._main_lay.addWidget(self._grid_widget)
+        self._main_lay.addWidget(self._toast_container)
 
         ss = self._state.settings
         t  = THEMES.get(ss.theme, THEMES["Cupertino Light"])
@@ -438,7 +502,7 @@ class MainWindow(QMainWindow):
             self._state.collapsed_groups.add(rowid)
         self._save_state()
         self._rebuild_rows()
-        self.adjustSize()
+        self._shrink_to_fit()
 
     def _on_remove(self, rowid):
         if QApplication.keyboardModifiers() & Qt.ShiftModifier:
@@ -622,8 +686,16 @@ class MainWindow(QMainWindow):
         s.always_on_top        = dlg.chosen_always_on_top
         s.confirm_delete       = dlg.chosen_confirm_delete
         s.confirm_reset        = dlg.chosen_confirm_reset
+        old_dr_enabled = s.daily_reset_enabled
+        old_dr_time    = s.daily_reset_time
         s.daily_reset_enabled  = dlg.chosen_daily_reset_enabled
         s.daily_reset_time     = dlg.chosen_daily_reset_time
+
+        # If daily reset was just enabled or the time changed, anchor
+        # session_start to now so only future boundaries trigger resets.
+        if (s.daily_reset_enabled
+                and (not old_dr_enabled or s.daily_reset_time != old_dr_time)):
+            self._state.session_start = datetime.now().astimezone()
         s.snapshot_min_minutes = dlg.chosen_snapshot_min_minutes
         s.button_visibility    = dlg.chosen_button_visibility
 
@@ -661,6 +733,14 @@ class MainWindow(QMainWindow):
         self._apply_style()
         self._rebuild_rows()
         self.adjustSize()
+        # Parse backup filename: state_YYYYMMDD_HHMMSS_nonce
+        m = re.search(r"(\d{4})(\d{2})(\d{2})_(\d{2})(\d{2})(\d{2})", path.stem)
+        if m:
+            y, mo, d, h, mi, s = m.groups()
+            time_str = f"{y}-{mo}-{d} {h}:{mi}:{s}"
+        else:
+            time_str = path.stem
+        self.show_toast(f"Restored from backup ({time_str})", 5)
 
     # ------------------------------------------------------------------ #
     #  Timer control                                                       #
@@ -761,6 +841,46 @@ class MainWindow(QMainWindow):
         for rid in self.timers:
             self._update_display(rid)
 
+    def _shrink_to_fit(self):
+        """Resize window to tightly fit its contents (allows shrinking)."""
+        grid_hint = self._grid_widget.sizeHint()
+        margins = self._main_lay.contentsMargins()
+        target_w = grid_hint.width() + margins.left() + margins.right()
+        target_h = grid_hint.height() + margins.top() + margins.bottom()
+        extra_h = self.height() - self.centralWidget().height()
+        extra_w = self.width() - self.centralWidget().width()
+        self.setMinimumSize(0, 0)
+        self.centralWidget().setMinimumSize(0, 0)
+        self.resize(target_w + extra_w, target_h + extra_h)
+
+    def show_toast(self, message, seconds=5):
+        """Show a transient notification at the bottom of the window."""
+        t = THEMES.get(self._state.settings.theme, THEMES["Cupertino Light"])
+        self._toast.setText(message)
+        self._toast.setStyleSheet(
+            f"background-color: {t['separator']};"
+            f" color: {t['text']};"
+            f" padding: 3px 8px;")
+        self._toast_opacity.setOpacity(1.0)
+        self._toast_container.setVisible(True)
+        self.adjustSize()
+        QTimer.singleShot(int(seconds * 1000), self._fade_toast)
+
+    def _fade_toast(self):
+        self._toast_fade = QPropertyAnimation(self._toast_opacity, b"opacity")
+        self._toast_fade.setDuration(300)
+        self._toast_fade.setStartValue(1.0)
+        self._toast_fade.setEndValue(0.0)
+        self._toast_fade.setEasingCurve(QEasingCurve.OutCubic)
+        self._toast_fade.finished.connect(self._dismiss_toast)
+        self._toast_fade.start()
+
+    def _dismiss_toast(self):
+        if self._toast_container.isVisible():
+            self._toast_container.setVisible(False)
+            self._toast_opacity.setOpacity(1.0)
+            self._shrink_to_fit()
+
     def _sync_footer_heights(self):
         if hasattr(self, "_add_btn") and self._add_btn.height() > 0:
             h = self._add_btn.height()
@@ -847,10 +967,13 @@ class MainWindow(QMainWindow):
         self._stop_all()
         for ts in self.timers.values():
             ts.reset()
-        self._update_all_displays()
+        self._rebuild_rows()
 
         self._state.session_start = boundary_dt
         self._try_snapshot(reason="daily_reset_rollover", priority="high")
+
+        time_str = boundary_dt.strftime("%I:%M %p").lstrip("0")
+        self.show_toast(f"Session saved and reset at {time_str}", 6)
 
     # ------------------------------------------------------------------ #
     #  Window close                                                        #
