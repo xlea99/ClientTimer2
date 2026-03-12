@@ -242,6 +242,7 @@ class ConfigDialog(QDialog):
         self._snapshot_interval.setValue(cfg.get("snapshot_min_minutes", 5))
         self._snapshot_interval.setSuffix(" min")
         self._snapshot_interval.setMinimumWidth(200)
+        self._snapshot_interval.setMinimumHeight(28)
         self._snapshot_interval.setToolTip(backup_interval_tooltip)
         row.addWidget(lbl)
         row.addWidget(self._snapshot_interval)

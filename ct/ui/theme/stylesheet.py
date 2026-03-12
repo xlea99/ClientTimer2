@@ -41,7 +41,7 @@ def build_stylesheet(theme_name):
         f"  color: {t['button_text']};"
         f"  background-color: {t['button_bg']};"
         f"  border: {t['border']}px solid rgba(128,128,128,0.4);"
-        f"  padding: 3px 5px;"
+        f"  padding: 3px 20px 3px 5px;"
         f"}}"
         f"QListWidget {{"
         f"  background-color: {t['button_bg']};"

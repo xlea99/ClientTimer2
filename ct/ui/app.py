@@ -1,4 +1,5 @@
 import ctypes
+import os
 import re
 import time
 import sys
@@ -20,6 +21,7 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
+from ct.common.logger import log
 from ct.common.setup import PATHS
 from ct.core.config import AppState, save_completed_session
 from ct.core.snapshot import create_snapshot, prune_snapshots
@@ -137,6 +139,7 @@ class MainWindow(QMainWindow):
 
         # 1. CT1 migration — data handled in AppState.load(), show user a
         #    notification if it happened.
+        # 1a. CT1 migration notification
         if self._state.migrated_from_ct1:
             m = self._state.migrated_from_ct1
             timers = ", ".join(m.get("Timers", []))
@@ -149,6 +152,20 @@ class MainWindow(QMainWindow):
                 f"Size: {m.get('Size', 'Regular')}",
             )
             self._state.migrated_from_ct1 = None
+
+        # 1b. Defang CT1's config.txt files — CT1 uses eval() on dict
+        #     values, so any writable config.txt is an RCE vulnerability.
+        ct1_configs = [
+            PATHS.old / "config.txt",
+            Path(os.environ.get("PROGRAMFILES(X86)", "")) / "ICOMM Client Timer" / "config.txt",
+        ]
+        for ct1_config in ct1_configs:
+            if ct1_config.exists():
+                try:
+                    ct1_config.rename(ct1_config.with_suffix(".txt.migrated"))
+                    log.info(f"Renamed CT1 config: {ct1_config}")
+                except OSError:
+                    log.warning(f"Could not rename CT1 config: {ct1_config}", exc_info=True)
 
         # 2. Daily reset catch-up — if the app was closed and we missed a
         #    reset boundary, save the old session and zero out timers.
@@ -775,7 +792,8 @@ class MainWindow(QMainWindow):
             self._stop_all()
             for ts in self.timers.values():
                 ts.reset()
-            self._update_all_displays()
+            self._rebuild_rows()
+            self.show_toast("Reset all times to zero.")
 
     # ------------------------------------------------------------------ #
     #  Display helpers                                                     #
