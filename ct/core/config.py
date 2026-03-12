@@ -104,6 +104,7 @@ class AppState:
         self.collapsed_groups = collapsed_groups  # live set — mutated in place by MainWindow
         self.session_start    = session_start
         self.tracked_times    = tracked_times     # used only during MainWindow.__init__
+        self.migrated_from_ct1 = None             # set by load() if CT1 migration occurred
 
     # Helper to build the full state dict from current live data.
     def _serialize(self, timers: dict) -> dict:
@@ -154,6 +155,7 @@ class AppState:
                         })
                     state["settings"]["size"]  = migration["Size"]
                     state["settings"]["theme"] = migration["Theme"]
+                    state["_migrated_from_ct1"] = migration
                     log.info("Migrated state from ClientTimer1 config.txt.")
                 else:
                     log.info("No existing state.json; loading fresh state.")
@@ -227,7 +229,9 @@ class AppState:
         except (ValueError, TypeError):
             start = datetime.now().astimezone()
         tracked = state["session"]["tracked_times"]
-        return cls(settings, rows, collapsed, start, tracked)
+        obj = cls(settings, rows, collapsed, start, tracked)
+        obj.migrated_from_ct1 = state.get("_migrated_from_ct1")
+        return obj
     # Serialize and write state to disk. Returns the state dict.
     def save(self, timers: dict) -> dict:
         state = self._serialize(timers)

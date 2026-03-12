@@ -18,6 +18,8 @@ from PySide6.QtWidgets import (
     QListWidget,
     QMessageBox,
     QPushButton,
+    QScrollArea,
+    QSizePolicy,
     QSpinBox,
     QStackedWidget,
     QTableWidget,
@@ -59,10 +61,12 @@ class ConfigDialog(QDialog):
         self.style_changed = False
 
         # --- Layout ---
-        outer = QVBoxLayout(self)
+        outer = QHBoxLayout(self)
 
-        body = QHBoxLayout()
+        # Left column: sidebar + pages + apply button
+        left_col = QVBoxLayout()
 
+        pages = QHBoxLayout()
         # Left sidebar
         self._tab_list = QListWidget()
         self._tab_list.setFixedWidth(140)
@@ -72,16 +76,16 @@ class ConfigDialog(QDialog):
         self._tab_list.addItem("Appearance")
         self._tab_list.setCurrentRow(0)
         self._tab_list.currentRowChanged.connect(self._on_tab_changed)
-        body.addWidget(self._tab_list)
+        pages.addWidget(self._tab_list)
 
         # Right content
         self._stack = QStackedWidget()
         self._stack.addWidget(self._build_general_page(cfg, on_reset))
         self._stack.addWidget(self._build_daily_reset_page(cfg))
         self._stack.addWidget(self._build_appearance_page(cfg))
-        body.addWidget(self._stack, 1)
+        pages.addWidget(self._stack, 1)
 
-        outer.addLayout(body, 1)
+        left_col.addLayout(pages, 1)
 
         # Bottom row: restart indicator + Apply
         btn_row = QHBoxLayout()
@@ -95,13 +99,42 @@ class ConfigDialog(QDialog):
         apply_btn.setFont(QFont("Calibri", 12))
         apply_btn.clicked.connect(self._apply)
         btn_row.addWidget(apply_btn)
-        outer.addLayout(btn_row)
+        left_col.addLayout(btn_row)
+
+        outer.addLayout(left_col, 1)
+
+        # State preview panel (right side, shown when a snapshot/session is clicked)
+        self._preview_scroll = QScrollArea()
+        self._preview_scroll.setWidgetResizable(True)
+        self._preview_scroll.setFixedWidth(260)
+        self._preview_scroll.setVisible(False)
+        self._preview_scroll.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Expanding)
+        outer.addWidget(self._preview_scroll)
+
+        # Track which table is active so we can deselect the other
+        self._active_table = None
 
         # Track initial values for restart detection
         self._initial_always_on_top = cfg.get("always_on_top", True)
 
     def _on_tab_changed(self, index):
         self._stack.setCurrentIndex(index)
+        # Hide preview, backup browser, and clear selections when switching tabs.
+        # Block table signals to prevent clearSelection from re-triggering
+        # _on_table_selected and re-showing the preview.
+        self._hide_preview()
+        if hasattr(self, '_backup_browser'):
+            self._backup_browser.setVisible(False)
+        if hasattr(self, '_snap_table'):
+            self._snap_table.blockSignals(True)
+            self._snap_table.clearSelection()
+            self._snap_table.blockSignals(False)
+        if hasattr(self, '_session_table'):
+            self._session_table.blockSignals(True)
+            self._session_table.clearSelection()
+            self._session_table.blockSignals(False)
+        if hasattr(self, '_restore_btn'):
+            self._restore_btn.setEnabled(False)
 
     def _check_restart_needed(self):
         current_aot = self._always_on_top.currentText() == "Always On Top"
@@ -148,22 +181,6 @@ class ConfigDialog(QDialog):
         row.addWidget(self._always_on_top)
         lay.addLayout(row)
 
-        # Snapshot Interval
-        row = QHBoxLayout()
-        lbl = QLabel("Snapshot Interval:")
-        snapshot_interval_tooltip = "Will try to keep a fresh snapshot/backup of the current user configuration every N minutes."
-        lbl.setFont(QFont("Calibri", 12, QFont.Bold))
-        lbl.setToolTip(snapshot_interval_tooltip)
-        self._snapshot_interval = QSpinBox()
-        self._snapshot_interval.setRange(1, 60)
-        self._snapshot_interval.setValue(cfg.get("snapshot_min_minutes", 5))
-        self._snapshot_interval.setSuffix(" min")
-        self._snapshot_interval.setMinimumWidth(200)
-        self._snapshot_interval.setToolTip(snapshot_interval_tooltip)
-        row.addWidget(lbl)
-        row.addWidget(self._snapshot_interval)
-        lay.addLayout(row)
-
         # Confirm Delete
         row = QHBoxLayout()
         lbl = QLabel("Confirm Delete:")
@@ -196,36 +213,57 @@ class ConfigDialog(QDialog):
         row.addWidget(self._confirm_reset)
         lay.addLayout(row)
 
-        # Separator
-        sep = QFrame()
-        sep.setFrameShape(QFrame.HLine)
-        sep.setFrameShadow(QFrame.Sunken)
-        lay.addWidget(sep)
-
-        # Action buttons
+        # Reset All Times — next to the confirm settings it relates to
         btn_row = QHBoxLayout()
+        btn_row.addStretch()
         reset_btn = QPushButton("Reset All Times")
         reset_btn.setFont(QFont("Calibri", 11))
         reset_btn.clicked.connect(on_reset)
-        browse_btn = QPushButton("Browse Snapshots")
-        browse_btn.setFont(QFont("Calibri", 11))
-        browse_btn.clicked.connect(self._toggle_snapshot_browser)
         btn_row.addWidget(reset_btn)
+        lay.addLayout(btn_row)
+
+        # Separator
+        sep = QFrame()
+        sep.setObjectName("settingsSep")
+        sep.setFixedHeight(2)
+        lay.addWidget(sep)
+
+        # Backups
+        self._snap_paths = []
+
+        # Backup Interval
+        row = QHBoxLayout()
+        lbl = QLabel("Backup Interval:")
+        backup_interval_tooltip = "Will try to keep a fresh backup of the current state every N minutes."
+        lbl.setFont(QFont("Calibri", 12, QFont.Bold))
+        lbl.setToolTip(backup_interval_tooltip)
+        self._snapshot_interval = QSpinBox()
+        self._snapshot_interval.setRange(1, 60)
+        self._snapshot_interval.setValue(cfg.get("snapshot_min_minutes", 5))
+        self._snapshot_interval.setSuffix(" min")
+        self._snapshot_interval.setMinimumWidth(200)
+        self._snapshot_interval.setToolTip(backup_interval_tooltip)
+        row.addWidget(lbl)
+        row.addWidget(self._snapshot_interval)
+        lay.addLayout(row)
+
+        # Restore from Backup — toggle button
+        btn_row = QHBoxLayout()
         btn_row.addStretch()
+        browse_btn = QPushButton("Restore from Backup")
+        browse_btn.setFont(QFont("Calibri", 11))
+        browse_btn.clicked.connect(self._toggle_backup_browser)
         btn_row.addWidget(browse_btn)
         lay.addLayout(btn_row)
 
-        # Snapshot browser — hidden until Browse Snapshots is clicked
-        self._snap_paths = []
-        self._snap_browser = QFrame()
-        self._snap_browser.setFrameShape(QFrame.Box)
-        self._snap_browser.setFrameShadow(QFrame.Sunken)
-        snap_lay = QVBoxLayout(self._snap_browser)
-        snap_lay.setSpacing(6)
-        snap_lay.setContentsMargins(4, 4, 4, 4)
+        # Backup browser — hidden until toggled
+        self._backup_browser = QWidget()
+        backup_lay = QVBoxLayout(self._backup_browser)
+        backup_lay.setContentsMargins(0, 0, 0, 0)
+        backup_lay.setSpacing(6)
 
         self._snap_table = QTableWidget(0, 2)
-        self._snap_table.setHorizontalHeaderLabels(["Snapshot Time", "Age"])
+        self._snap_table.setHorizontalHeaderLabels(["Backup Time", "Age"])
         self._snap_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.Stretch)
         self._snap_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeToContents)
         self._snap_table.verticalHeader().setVisible(False)
@@ -233,30 +271,45 @@ class ConfigDialog(QDialog):
         self._snap_table.setSelectionMode(QAbstractItemView.SingleSelection)
         self._snap_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
         self._snap_table.setMinimumHeight(160)
-        self._snap_table.itemSelectionChanged.connect(self._on_snapshot_selected)
-        snap_lay.addWidget(self._snap_table)
+        self._snap_table.itemSelectionChanged.connect(
+            lambda: self._on_table_selected(self._snap_table, self._snap_paths))
+        backup_lay.addWidget(self._snap_table)
 
-        self._restore_btn = QPushButton("Restore from Snapshot")
+        self._restore_btn = QPushButton("Restore")
         self._restore_btn.setFont(QFont("Calibri", 11))
         self._restore_btn.setEnabled(False)
         self._restore_btn.clicked.connect(self._on_restore_clicked)
-        snap_lay.addWidget(self._restore_btn)
+        backup_lay.addWidget(self._restore_btn)
 
-        self._snap_browser.setVisible(False)
-        lay.addWidget(self._snap_browser)
+        self._backup_browser.setVisible(False)
+        lay.addWidget(self._backup_browser)
 
         lay.addStretch()
         return page
 
     # ------------------------------------------------------------------ #
-    #  Snapshot browser                                                    #
+    #  Backup browser                                                      #
     # ------------------------------------------------------------------ #
 
-    def _toggle_snapshot_browser(self):
-        visible = not self._snap_browser.isVisible()
-        self._snap_browser.setVisible(visible)
+    def _hide_preview(self):
+        """Hide the preview panel and shrink the dialog back to fit."""
+        if self._preview_scroll.isVisible():
+            self._preview_scroll.setVisible(False)
+            self.layout().activate()
+            hint = self.layout().sizeHint()
+            self.setMinimumSize(0, 0)
+            self.setMaximumSize(16777215, 16777215)
+            self.resize(hint)
+
+    def _toggle_backup_browser(self):
+        visible = not self._backup_browser.isVisible()
+        self._backup_browser.setVisible(visible)
         if visible:
             self._load_snapshots()
+        else:
+            self._snap_table.clearSelection()
+            self._restore_btn.setEnabled(False)
+            self._hide_preview()
 
     def _load_snapshots(self):
         _SNAP_RE = re.compile(r"state_(\d{8}_\d{6})_\d+\.json")
@@ -294,36 +347,10 @@ class ConfigDialog(QDialog):
             else:
                 age_str = f"{secs // 86400}d {(secs % 86400) // 3600}h ago"
 
-            tooltip = self._build_snapshot_tooltip(path)
-            time_item = QTableWidgetItem(time_str)
-            time_item.setToolTip(tooltip)
-            age_item = QTableWidgetItem(age_str)
-            age_item.setToolTip(tooltip)
-            self._snap_table.setItem(row, 0, time_item)
-            self._snap_table.setItem(row, 1, age_item)
+            self._snap_table.setItem(row, 0, QTableWidgetItem(time_str))
+            self._snap_table.setItem(row, 1, QTableWidgetItem(age_str))
 
         self._restore_btn.setEnabled(False)
-
-    def _build_snapshot_tooltip(self, path: Path) -> str:
-        try:
-            with open(path, "r", encoding="utf-8") as f:
-                data = json.load(f)
-            rows    = data.get("layout", {}).get("rows", [])
-            tracked = data.get("session", {}).get("tracked_times", {})
-            lines = []
-            for row in rows:
-                if row.get("type") != "timer":
-                    continue
-                elapsed = tracked.get(str(row.get("rowid", "")), {}).get("elapsed", 0)
-                lines.append(f"{format_time(int(elapsed))}  {row.get('name', '?')}")
-                if len(lines) >= 12:
-                    break
-            return "\n".join(lines) if lines else "(no timers)"
-        except Exception:
-            return "(could not load snapshot)"
-
-    def _on_snapshot_selected(self):
-        self._restore_btn.setEnabled(bool(self._snap_table.selectedItems()))
 
     def _on_restore_clicked(self):
         row = self._snap_table.currentRow()
@@ -333,14 +360,245 @@ class ConfigDialog(QDialog):
         time_str = self._snap_table.item(row, 0).text()
         answer = QMessageBox.question(
             self,
-            "Restore from Snapshot",
-            f"Restore from snapshot taken at:\n{time_str}\n\nThis will overwrite the current state.",
+            "Restore from Backup",
+            f"Restore from backup taken at:\n{time_str}\n\nThis will overwrite the current state.",
             QMessageBox.Yes | QMessageBox.No,
             QMessageBox.No,
         )
         if answer == QMessageBox.Yes:
             self.restore_path = path
             self.accept()
+
+    # ------------------------------------------------------------------ #
+    #  Shared table selection / state preview                              #
+    # ------------------------------------------------------------------ #
+
+    def _on_table_selected(self, table, paths):
+        """Handle row selection in either snapshot or session table."""
+        # Enable restore button only for snapshot table
+        if table is self._snap_table:
+            self._restore_btn.setEnabled(bool(table.selectedItems()))
+
+        # Deselect the other table so only one selection is active
+        if table is self._snap_table and hasattr(self, '_session_table'):
+            self._session_table.clearSelection()
+        elif table is not self._snap_table and hasattr(self, '_snap_table'):
+            self._snap_table.clearSelection()
+            self._restore_btn.setEnabled(False)
+        self._active_table = table
+
+        row = table.currentRow()
+        if row < 0 or row >= len(paths):
+            self._hide_preview()
+            return
+        time_str = table.item(row, 0).text()
+        if table is self._snap_table:
+            title = f"Backup\n{time_str}"
+        else:
+            title = f"Completed Session\n{time_str}"
+        self._show_state_preview(paths[row], title)
+
+    def _show_state_preview(self, path, title=""):
+        """Load a state JSON file and display a read-only view in the preview panel."""
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+        except Exception:
+            self._hide_preview()
+            return
+
+        rows = data.get("layout", {}).get("rows", [])
+        tracked = data.get("session", {}).get("tracked_times", {})
+
+        # Resolve theme for colors
+        theme_name = self.chosen_theme
+        t = THEMES.get(theme_name, THEMES["Cupertino Light"])
+
+        # Build the preview widget
+        content = QWidget()
+        content.setStyleSheet(f"background-color: {t['bg']};")
+        lay = QVBoxLayout(content)
+        lay.setSpacing(2)
+        lay.setContentsMargins(6, 6, 6, 6)
+
+        # Title
+        if title:
+            title_lbl = QLabel(title)
+            title_lbl.setFont(QFont("Calibri", 10, QFont.Bold))
+            title_lbl.setAlignment(Qt.AlignCenter)
+            title_lbl.setStyleSheet(
+                f"color: {t['text']}; background: transparent;")
+            title_lbl.setWordWrap(True)
+            lay.addWidget(title_lbl)
+            sep = QFrame()
+            sep.setObjectName("settingsSep")
+            sep.setFixedHeight(1)
+            lay.addWidget(sep)
+
+        label_font = QFont("Calibri", 10)
+        label_font_bold = QFont("Calibri", 10)
+        label_font_bold.setBold(True)
+        time_font = QFont("Calibri", 10)
+
+        # Track group structure for collapsible separators
+        self._preview_groups = {}  # sep_rowid -> (toggle_btn, [child_widgets])
+
+        current_sep_rid = None
+        for row in rows:
+            rid = row.get("rowid", 0)
+            rtype = row.get("type", "timer")
+            name = row.get("name", "?")
+
+            if rtype == "separator":
+                current_sep_rid = rid
+                # Calculate total time for children
+                children = []
+                total = 0
+                for r2 in rows:
+                    if r2 is row:
+                        continue
+                    if r2.get("type") == "separator":
+                        if children:
+                            break
+                        continue
+                    if current_sep_rid == rid:
+                        children.append(r2)
+                # Recalculate properly — gather children that follow this separator
+                children = []
+                found = False
+                for r2 in rows:
+                    if r2 is row:
+                        found = True
+                        continue
+                    if not found:
+                        continue
+                    if r2.get("type") == "separator":
+                        break
+                    children.append(r2)
+                total = sum(
+                    tracked.get(str(c.get("rowid", "")), {}).get("elapsed", 0)
+                    for c in children)
+
+                sep_w = QWidget()
+                sep_w.setObjectName(f"pvSep{rid}")
+                ghbg = row.get("bg") or t.get("group_header_bg", t["bg"])
+                sep_w.setStyleSheet(
+                    f"#pvSep{rid} {{ background-color: {ghbg}; }}")
+                sep_lay = QHBoxLayout(sep_w)
+                sep_lay.setContentsMargins(2, 2, 2, 2)
+                sep_lay.setSpacing(4)
+
+                toggle = QPushButton("\u25BE")
+                toggle.setFixedSize(18, 18)
+                toggle.setStyleSheet("padding: 0; border: none; background: transparent;"
+                                     f" color: {t.get('group_header_text', t['text'])};")
+                sep_lay.addWidget(toggle)
+
+                name_lbl = QLabel(name)
+                name_lbl.setFont(label_font_bold)
+                name_lbl.setStyleSheet(
+                    f"color: {t.get('group_header_text', t['text'])};"
+                    " background: transparent;")
+                sep_lay.addWidget(name_lbl, 1)
+
+                time_lbl = QLabel(format_time(int(total)))
+                time_lbl.setFont(time_font)
+                time_lbl.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+                time_lbl.setStyleSheet(
+                    f"color: {t.get('group_header_text', t['text'])};"
+                    " background: transparent;")
+                sep_lay.addWidget(time_lbl)
+
+                lay.addWidget(sep_w)
+                self._preview_groups[rid] = (toggle, [])
+                toggle.clicked.connect(
+                    lambda _=False, r=rid: self._toggle_preview_group(r))
+
+            else:
+                elapsed = tracked.get(str(rid), {}).get("elapsed", 0)
+                is_child = current_sep_rid is not None
+
+                timer_w = QWidget()
+                timer_w.setObjectName(f"pvTmr{rid}")
+                rbg = row.get("bg") or t["bg"]
+                margin = "margin-left: 12px;" if is_child else ""
+                timer_w.setStyleSheet(
+                    f"#pvTmr{rid} {{ background-color: {rbg}; {margin} }}")
+                tmr_lay = QHBoxLayout(timer_w)
+                tmr_lay.setContentsMargins(4, 1, 4, 1)
+                tmr_lay.setSpacing(4)
+
+                name_lbl = QLabel(name)
+                name_lbl.setFont(label_font)
+                name_lbl.setStyleSheet(
+                    f"color: {t['text']}; background: transparent;")
+                tmr_lay.addWidget(name_lbl, 1)
+
+                time_lbl = QLabel(format_time(int(elapsed)))
+                time_lbl.setFont(time_font)
+                time_lbl.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+                time_lbl.setStyleSheet(
+                    f"color: {t['text']}; background: transparent;")
+                tmr_lay.addWidget(time_lbl)
+
+                lay.addWidget(timer_w)
+
+                if current_sep_rid is not None and current_sep_rid in self._preview_groups:
+                    self._preview_groups[current_sep_rid][1].append(timer_w)
+
+        lay.addStretch()
+        self._preview_scroll.setWidget(content)
+        self._preview_scroll.setVisible(True)
+
+    def _toggle_preview_group(self, sep_rid):
+        """Toggle collapse/expand of a group in the state preview."""
+        if sep_rid not in self._preview_groups:
+            return
+        toggle, children = self._preview_groups[sep_rid]
+        collapsed = children and children[0].isVisible()
+        for w in children:
+            w.setVisible(not collapsed)
+        toggle.setText("\u25B8" if collapsed else "\u25BE")
+
+    def _load_sessions(self):
+        """Load completed session files into the session table."""
+        _SESSION_RE = re.compile(r"session_(\d{8}_\d{6})_\d+\.json")
+        now = datetime.now()
+        entries = []
+        try:
+            for path in PATHS.sessions.iterdir():
+                m = _SESSION_RE.match(path.name)
+                if not m:
+                    continue
+                try:
+                    dt = datetime.strptime(m.group(1), "%Y%m%d_%H%M%S")
+                except ValueError:
+                    continue
+                entries.append((dt, path))
+        except OSError:
+            pass
+        entries.sort(reverse=True)
+
+        self._session_table.setRowCount(0)
+        self._session_paths = []
+        for dt, path in entries:
+            row = self._session_table.rowCount()
+            self._session_table.insertRow(row)
+            self._session_paths.append(path)
+
+            time_str = dt.strftime("%Y-%m-%d %H:%M:%S")
+            secs = int((now - dt).total_seconds())
+            if secs < 60:
+                age_str = f"{secs}s ago"
+            elif secs < 3600:
+                age_str = f"{secs // 60}m {secs % 60}s ago"
+            elif secs < 86400:
+                age_str = f"{secs // 3600}h {(secs % 3600) // 60}m ago"
+            else:
+                age_str = f"{secs // 86400}d {(secs % 86400) // 3600}h ago"
+
+            self._session_table.setItem(row, 0, QTableWidgetItem(time_str))
+            self._session_table.setItem(row, 1, QTableWidgetItem(age_str))
 
     # ------------------------------------------------------------------ #
     #  Daily Reset page                                                    #
@@ -403,11 +661,31 @@ class ConfigDialog(QDialog):
 
         # Separator
         sep2 = QFrame()
-        sep2.setFrameShape(QFrame.HLine)
-        sep2.setFrameShadow(QFrame.Sunken)
+        sep2.setObjectName("settingsSep")
+        sep2.setFixedHeight(2)
         lay.addWidget(sep2)
 
-        # Open Sessions Folder button (child — grayed when off)
+        # Past Sessions
+        self._session_paths = []
+
+        session_lbl = QLabel("Past Sessions")
+        session_lbl.setFont(QFont("Calibri", 12, QFont.Bold))
+        lay.addWidget(session_lbl)
+
+        self._session_table = QTableWidget(0, 2)
+        self._session_table.setHorizontalHeaderLabels(["Session Date", "Age"])
+        self._session_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.Stretch)
+        self._session_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeToContents)
+        self._session_table.verticalHeader().setVisible(False)
+        self._session_table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self._session_table.setSelectionMode(QAbstractItemView.SingleSelection)
+        self._session_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self._session_table.setMinimumHeight(160)
+        self._session_table.itemSelectionChanged.connect(
+            lambda: self._on_table_selected(self._session_table, self._session_paths))
+        lay.addWidget(self._session_table)
+
+        # Open Sessions Folder button
         btn_row = QHBoxLayout()
         btn_row.addStretch()
         self._sessions_folder_btn = QPushButton("Open Sessions Folder")
@@ -419,7 +697,7 @@ class ConfigDialog(QDialog):
         btn_row.addWidget(self._sessions_folder_btn)
         lay.addLayout(btn_row)
 
-        self._dr_child_widgets.append(self._sessions_folder_btn)
+        self._load_sessions()
 
         lay.addStretch()
 
