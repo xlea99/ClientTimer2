@@ -44,12 +44,14 @@ class RowFactory:
             row_bg = row.get("bg") or blueprint.theme["group_header_bg"]
 
         # Build the row's contaner
+        group_border = blueprint.theme.get("group_border", row_bg)
         row_container = QWidget()
         row_container.setObjectName("rowBg")
         row_container.setStyleSheet(
-            f"#rowBg {{ background-color: {row_bg}; {margin_css} }}")
+            f"#rowBg {{ background-color: {row_bg}; {margin_css}"
+            f" border: 2px solid {group_border}; }}")
         row_container_layout = QHBoxLayout(row_container)
-        row_container_layout.setContentsMargins(0, 0, 0, 0)
+        row_container_layout.setContentsMargins(3, 3, 3, 3)
         row_container_layout.setSpacing(blueprint.h_spacing)
 
         # Col 0: toggle

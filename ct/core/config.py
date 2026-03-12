@@ -28,8 +28,8 @@ _SETTINGS_DEFAULTS = {
     "always_on_top":        True,
     "confirm_delete":       True,
     "confirm_reset":        True,
-    "daily_reset_enabled":  False,
-    "daily_reset_time":     "00:00",
+    "daily_reset_enabled":  True,
+    "daily_reset_time":     "03:00",
     "snapshot_min_minutes": 5,
     "button_visibility":    "All",
 }
@@ -48,8 +48,8 @@ class Settings:
     always_on_top:        bool = True
     confirm_delete:       bool = True
     confirm_reset:        bool = True
-    daily_reset_enabled:  bool = False
-    daily_reset_time:     str  = "00:00"
+    daily_reset_enabled:  bool = True
+    daily_reset_time:     str  = "03:00"
     snapshot_min_minutes: int  = 5
     button_visibility:    str  = "All"
 

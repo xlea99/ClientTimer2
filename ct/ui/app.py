@@ -1,6 +1,7 @@
 import ctypes
 import os
 import re
+import shutil
 import time
 import sys
 from pathlib import Path
@@ -137,10 +138,14 @@ class MainWindow(QMainWindow):
         """All pre-UI initialization: migration, daily reset catch-up, etc."""
         self._pending_toast = None
 
-        # 1. CT1 migration — data handled in AppState.load(), show user a
-        #    notification if it happened.
-        # 1a. CT1 migration notification
-        if self._state.migrated_from_ct1:
+        # 1. CT1 cleanup
+        #    Migration data is handled in AppState.load(). On the FIRST launch
+        #    after migration, we show a popup and keep the roaming folder alive
+        #    (load() already read from it). On EVERY subsequent launch, we nuke
+        #    the roaming folder if it still exists, and defang any config.txt
+        #    in Program Files that the Inno installer might not have caught.
+        just_migrated = self._state.migrated_from_ct1 is not None
+        if just_migrated:
             m = self._state.migrated_from_ct1
             timers = ", ".join(m.get("Timers", []))
             QMessageBox.information(
@@ -153,19 +158,23 @@ class MainWindow(QMainWindow):
             )
             self._state.migrated_from_ct1 = None
 
-        # 1b. Defang CT1's config.txt files — CT1 uses eval() on dict
-        #     values, so any writable config.txt is an RCE vulnerability.
-        ct1_configs = [
-            PATHS.old / "config.txt",
-            Path(os.environ.get("PROGRAMFILES(X86)", "")) / "ICOMM Client Timer" / "config.txt",
-        ]
-        for ct1_config in ct1_configs:
-            if ct1_config.exists():
+        if not just_migrated and PATHS.old.exists():
+            try:
+                shutil.rmtree(PATHS.old)
+                log.info(f"Removed CT1 roaming folder: {PATHS.old}")
+            except OSError:
+                log.warning(f"Could not remove CT1 roaming folder: {PATHS.old}", exc_info=True)
+
+        # Defang any surviving CT1 config.txt (eval vulnerability)
+        pf86 = os.environ.get("PROGRAMFILES(X86)", "")
+        if pf86:
+            ct1_pf_config = Path(pf86) / "ICOMM Client Timer" / "config.txt"
+            if ct1_pf_config.exists():
                 try:
-                    ct1_config.rename(ct1_config.with_suffix(".txt.migrated"))
-                    log.info(f"Renamed CT1 config: {ct1_config}")
+                    ct1_pf_config.rename(ct1_pf_config.with_suffix(".txt.migrated"))
+                    log.info(f"Renamed CT1 config: {ct1_pf_config}")
                 except OSError:
-                    log.warning(f"Could not rename CT1 config: {ct1_config}", exc_info=True)
+                    log.warning(f"Could not rename CT1 config: {ct1_pf_config}", exc_info=True)
 
         # 2. Daily reset catch-up — if the app was closed and we missed a
         #    reset boundary, save the old session and zero out timers.
