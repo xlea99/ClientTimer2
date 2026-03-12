@@ -31,11 +31,15 @@ def read_old_config(old_config_path):
     return_dict = {}
     with open(old_config_path,"r") as f:
         for line in f.readlines():
+            parts = line.split("=", 1)
+            if len(parts) < 2:
+                continue
+            value = parts[1].strip()
             if line.startswith("> clientList"):
-                client_list = line.split("=")[1].strip().lstrip("[").rstrip("]")
+                client_list = value.lstrip("[").rstrip("]")
                 return_dict["Timers"] = client_list.split(",")
-            if line.startswith("> programColorTheme"):
-                return_dict["Theme"] = _APPROXIMATE_THEME.get(line.split("=")[1].strip(),"Cupertino Light")
-            if line.startswith("> programSize"):
-                return_dict["Size"] = line.split("=")[1].strip()
+            elif line.startswith("> programColorTheme"):
+                return_dict["Theme"] = _APPROXIMATE_THEME.get(value, "Cupertino Light")
+            elif line.startswith("> programSize"):
+                return_dict["Size"] = value
     return return_dict

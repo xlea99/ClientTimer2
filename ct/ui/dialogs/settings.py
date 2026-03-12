@@ -32,6 +32,25 @@ from ct.common.setup import PATHS
 from ct.ui.theme import THEMES, SIZES, FONTS
 from ct.util import format_time
 
+
+def _format_span(start_iso, end_iso):
+    """Format a start–end ISO pair as a human-readable AM/PM span string.
+
+    Same day:      'Mar 12, 3:43 AM – 7:45 PM'
+    Different day:  'Mar 11, 11:30 PM – Mar 12, 3:00 AM'
+    """
+    try:
+        s = datetime.fromisoformat(start_iso)
+        e = datetime.fromisoformat(end_iso)
+    except (ValueError, TypeError):
+        return None
+    fmt_time = "%#I:%M %p"        # Windows no-leading-zero hour
+    fmt_date = "%b %#d"           # 'Mar 12' style
+    if s.date() == e.date():
+        return f"{s.strftime(fmt_date)}, {s.strftime(fmt_time)} – {e.strftime(fmt_time)}"
+    return (f"{s.strftime(fmt_date)}, {s.strftime(fmt_time)} – "
+            f"{e.strftime(fmt_date)}, {e.strftime(fmt_time)}")
+
 # Simple tabbed settings dialog with a left sidebar for different categories. Opens when the user clicks the little
 # gear icon in main app
 class ConfigDialog(QDialog):
@@ -213,6 +232,22 @@ class ConfigDialog(QDialog):
         row.addWidget(self._confirm_reset)
         lay.addLayout(row)
 
+        # Recover Running Time
+        row = QHBoxLayout()
+        lbl = QLabel("Recover Running Time:")
+        recover_tooltip = "If a timer was running when the app closed, add the elapsed time on next launch."
+        lbl.setFont(QFont("Calibri", 12, QFont.Bold))
+        lbl.setToolTip(recover_tooltip)
+        self._recover_running = QComboBox()
+        self._recover_running.addItems(["Yes", "No"])
+        self._recover_running.setCurrentText(
+            "Yes" if cfg.get("recover_running_time", True) else "No")
+        self._recover_running.setMinimumWidth(200)
+        self._recover_running.setToolTip(recover_tooltip)
+        row.addWidget(lbl)
+        row.addWidget(self._recover_running)
+        lay.addLayout(row)
+
         # Reset All Times — next to the confirm settings it relates to
         btn_row = QHBoxLayout()
         btn_row.addStretch()
@@ -264,7 +299,7 @@ class ConfigDialog(QDialog):
         backup_lay.setSpacing(6)
 
         self._snap_table = QTableWidget(0, 2)
-        self._snap_table.setHorizontalHeaderLabels(["Backup Time", "Age"])
+        self._snap_table.setHorizontalHeaderLabels(["Backup Span", "Age"])
         self._snap_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.Stretch)
         self._snap_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeToContents)
         self._snap_table.verticalHeader().setVisible(False)
@@ -337,7 +372,19 @@ class ConfigDialog(QDialog):
             self._snap_table.insertRow(row)
             self._snap_paths.append(path)
 
-            time_str = dt.strftime("%Y-%m-%d %H:%M:%S")
+            # Try to read session span from the JSON
+            span_str = None
+            try:
+                with open(path, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                start = data.get("session", {}).get("start")
+                end = data.get("meta", {}).get("saved_at")
+                span_str = _format_span(start, end)
+            except Exception:
+                pass
+            if not span_str:
+                span_str = dt.strftime("%b %#d, %#I:%M %p")
+
             secs = int((now - dt).total_seconds())
             if secs < 60:
                 age_str = f"{secs}s ago"
@@ -348,7 +395,7 @@ class ConfigDialog(QDialog):
             else:
                 age_str = f"{secs // 86400}d {(secs % 86400) // 3600}h ago"
 
-            self._snap_table.setItem(row, 0, QTableWidgetItem(time_str))
+            self._snap_table.setItem(row, 0, QTableWidgetItem(span_str))
             self._snap_table.setItem(row, 1, QTableWidgetItem(age_str))
 
         self._restore_btn.setEnabled(False)
@@ -392,11 +439,11 @@ class ConfigDialog(QDialog):
         if row < 0 or row >= len(paths):
             self._hide_preview()
             return
-        time_str = table.item(row, 0).text()
+        span_str = table.item(row, 0).text()
         if table is self._snap_table:
-            title = f"Backup\n{time_str}"
+            title = f"Backup\n{span_str}"
         else:
-            title = f"Completed Session\n{time_str}"
+            title = f"Completed Session\n{span_str}"
         self._show_state_preview(paths[row], title)
 
     def _show_state_preview(self, path, title=""):
@@ -587,7 +634,19 @@ class ConfigDialog(QDialog):
             self._session_table.insertRow(row)
             self._session_paths.append(path)
 
-            time_str = dt.strftime("%Y-%m-%d %H:%M:%S")
+            # Try to read session span from the JSON
+            span_str = None
+            try:
+                with open(path, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                start = data.get("session", {}).get("start")
+                end = data.get("session", {}).get("end")
+                span_str = _format_span(start, end)
+            except Exception:
+                pass
+            if not span_str:
+                span_str = dt.strftime("%b %#d, %#I:%M %p")
+
             secs = int((now - dt).total_seconds())
             if secs < 60:
                 age_str = f"{secs}s ago"
@@ -598,7 +657,7 @@ class ConfigDialog(QDialog):
             else:
                 age_str = f"{secs // 86400}d {(secs % 86400) // 3600}h ago"
 
-            self._session_table.setItem(row, 0, QTableWidgetItem(time_str))
+            self._session_table.setItem(row, 0, QTableWidgetItem(span_str))
             self._session_table.setItem(row, 1, QTableWidgetItem(age_str))
 
     # ------------------------------------------------------------------ #
@@ -674,7 +733,7 @@ class ConfigDialog(QDialog):
         lay.addWidget(session_lbl)
 
         self._session_table = QTableWidget(0, 2)
-        self._session_table.setHorizontalHeaderLabels(["Session Date", "Age"])
+        self._session_table.setHorizontalHeaderLabels(["Session Span", "Age"])
         self._session_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.Stretch)
         self._session_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeToContents)
         self._session_table.verticalHeader().setVisible(False)
@@ -872,7 +931,7 @@ class ConfigDialog(QDialog):
         self._p_grp_row = QWidget()
         self._p_grp_row.setObjectName("pGrpRow")
         grp_lay = QHBoxLayout(self._p_grp_row)
-        grp_lay.setContentsMargins(0, 0, 0, 0)
+        grp_lay.setContentsMargins(3, 3, 3, 3)
         grp_lay.setSpacing(6)
         self._p_toggle = QPushButton("\u25BE")
         self._p_gname = QLabel("Sysco")
@@ -972,8 +1031,10 @@ class ConfigDialog(QDialog):
         sep_on = self._sep.currentText() == "Yes"
         sep_css = (f"border-bottom: 1px solid {t['row_separator']};"
                    if sep_on else "")
+        group_border = t.get("group_border", ghbg)
         self._p_grp_row.setStyleSheet(
-            f"#pGrpRow {{ background-color: {ghbg}; }}")
+            f"#pGrpRow {{ background-color: {ghbg};"
+            f"  border: 2px solid {group_border}; }}")
         self._p_t1_row.setStyleSheet(
             f"#pT1Row {{ background-color: {t['bg']};"
             f"  margin-left: 12px; {sep_css} }}")
@@ -1115,6 +1176,8 @@ class ConfigDialog(QDialog):
             self._confirm_delete.currentText() == "Yes")
         self.chosen_confirm_reset = (
             self._confirm_reset.currentText() == "Yes")
+        self.chosen_recover_running_time = (
+            self._recover_running.currentText() == "Yes")
         # Daily Reset
         self.chosen_daily_reset_enabled = (
             self._daily_reset.currentText() == "On")

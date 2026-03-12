@@ -11,11 +11,13 @@ THEMES = {
         "row_dragged": "#2BA54E",
         "separator": "#C7C7CC",
         "row_separator": "#DCDCDC",
-        "group_header_bg": "#FDFDFD",
+        "group_header_bg": "#F5F5F7",
         "group_header_text": "#0B0B0B",
-        "group_border": "#ECECEC",
+        "group_border": "#E0E0E0",
         "running_text": "#006EFB",
         "group_running_text": "#006EFB",
+        "toast_bg": "#43BC5C",
+        "toast_fg": "#FFFFFF",
     },
     "Galaxy Dark": {
         "text": "#E1E7EC",
@@ -33,6 +35,8 @@ THEMES = {
         "group_border": "#151C21",
         "running_text": "#62B3EE",
         "group_running_text": "#62B3EE",
+        "toast_bg": "#1A3A55",
+        "toast_fg": "#E1E7EC",
     },
     "A Way": {
         "text": "#FDF7D1",
@@ -50,6 +54,8 @@ THEMES = {
         "group_border": "#1A1606",
         "running_text": "#FFD75A",
         "group_running_text": "#FFE47A",
+        "toast_bg": "#FDF7D1",
+        "toast_fg": "#1A1606",
     },
     "Black Herizons": {
         "text": "#EE0000",
@@ -67,6 +73,8 @@ THEMES = {
         "group_border": "#EE0000",
         "running_text": "#FFFFFF",
         "group_running_text": "#FFFFFF",
+        "toast_bg": "#EE0000",
+        "toast_fg": "#FFFFFF",
     },
     "Cimply Premier": {
         "text": "#333333",
@@ -84,6 +92,8 @@ THEMES = {
         "group_border": "#009ED9",
         "running_text": "#0097E0",
         "group_running_text": "#FDFDFD",
+        "toast_bg": "#023F71",
+        "toast_fg": "#FDFDFD",
     },
     "Dialpad At Dusk": {
         "text": "#FFF7FB",
@@ -101,6 +111,8 @@ THEMES = {
         "group_border": "#2E1F40",
         "running_text": "#FA593B",
         "group_running_text": "#FA593B",
+        "toast_bg": "#FFC8EA",
+        "toast_fg": "#1A1028",
     },
     "Gray Until Further Notice": {
         "text": "#1A1A1A",
@@ -118,6 +130,8 @@ THEMES = {
         "group_border": "#B2B2B2",
         "running_text": "#000000",
         "group_running_text": "#000000",
+        "toast_bg": "#707070",
+        "toast_fg": "#FFFFFF",
     },
     "ICOMM Blues": {
         "text": "#FDFDFD",
@@ -135,6 +149,8 @@ THEMES = {
         "group_border": "#0F0F36",
         "running_text": "#FFD700",
         "group_running_text": "#FFD700",
+        "toast_bg": "#E5EAFF",
+        "toast_fg": "#191C22",
     },
     "Manila Memories": {
         "text": "#241E19",
@@ -152,6 +168,8 @@ THEMES = {
         "group_border": "#C4B294",
         "running_text": "#7B4F2F",
         "group_running_text": "#7B4F2F",
+        "toast_bg": "#7B4F2F",
+        "toast_fg": "#FFF3DD",
     },
     "Park In The Forest": {
         "text": "#0C130D",
@@ -169,6 +187,8 @@ THEMES = {
         "group_border": "#24472D",
         "running_text": "#2E7C35",
         "group_running_text": "#205627",
+        "toast_bg": "#2E7C35",
+        "toast_fg": "#FFFFFF",
     },
     "T-Magentle": {
         "text": "#E20074",
@@ -186,5 +206,7 @@ THEMES = {
         "group_border": "#E20074",
         "running_text": "#790041",
         "group_running_text": "#FFFFFF",
+        "toast_bg": "#860043",
+        "toast_fg": "#FFFFFF",
     },
 }

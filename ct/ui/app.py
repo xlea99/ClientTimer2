@@ -1,7 +1,5 @@
 import ctypes
-import os
 import re
-import shutil
 import time
 import sys
 from pathlib import Path
@@ -120,8 +118,9 @@ class MainWindow(QMainWindow):
 
         # -- Show any pending toast from startup checks --
         if self._pending_toast:
-            QTimer.singleShot(0, lambda: self.show_toast(self._pending_toast, 6))
+            msg = self._pending_toast
             self._pending_toast = None
+            QTimer.singleShot(0, lambda: self.show_toast(msg, 6))
 
         # -- Tick timer (1 s) --
         self._tick_n = 0
@@ -138,14 +137,11 @@ class MainWindow(QMainWindow):
         """All pre-UI initialization: migration, daily reset catch-up, etc."""
         self._pending_toast = None
 
-        # 1. CT1 cleanup
-        #    Migration data is handled in AppState.load(). On the FIRST launch
-        #    after migration, we show a popup and keep the roaming folder alive
-        #    (load() already read from it). On EVERY subsequent launch, we nuke
-        #    the roaming folder if it still exists, and defang any config.txt
-        #    in Program Files that the Inno installer might not have caught.
-        just_migrated = self._state.migrated_from_ct1 is not None
-        if just_migrated:
+        # 1. CT1 migration notification
+        #    Migration data is handled in AppState.load(). The old config.txt
+        #    is left intact as a permanent migration source — the installer
+        #    handles killing CT1's exe (the actual threat).
+        if self._state.migrated_from_ct1:
             m = self._state.migrated_from_ct1
             timers = ", ".join(m.get("Timers", []))
             QMessageBox.information(
@@ -158,37 +154,72 @@ class MainWindow(QMainWindow):
             )
             self._state.migrated_from_ct1 = None
 
-        if not just_migrated and PATHS.old.exists():
-            try:
-                shutil.rmtree(PATHS.old)
-                log.info(f"Removed CT1 roaming folder: {PATHS.old}")
-            except OSError:
-                log.warning(f"Could not remove CT1 roaming folder: {PATHS.old}", exc_info=True)
-
-        # Defang any surviving CT1 config.txt (eval vulnerability)
-        pf86 = os.environ.get("PROGRAMFILES(X86)", "")
-        if pf86:
-            ct1_pf_config = Path(pf86) / "ICOMM Client Timer" / "config.txt"
-            if ct1_pf_config.exists():
-                try:
-                    ct1_pf_config.rename(ct1_pf_config.with_suffix(".txt.migrated"))
-                    log.info(f"Renamed CT1 config: {ct1_pf_config}")
-                except OSError:
-                    log.warning(f"Could not rename CT1 config: {ct1_pf_config}", exc_info=True)
-
         # 2. Daily reset catch-up — if the app was closed and we missed a
         #    reset boundary, save the old session and zero out timers.
         if self._state.settings.daily_reset_enabled:
             boundary = self._most_recent_reset_boundary()
             if self._state.session_start < boundary:
+                # Check if any timers were left running when the app closed.
+                # If so, ask the user whether to credit that time to the
+                # completed session before saving it.
+                running_timers = []
+                if self._state.settings.recover_running_time:
+                    for ts in self.timers.values():
+                        if ts.running and ts.started_at:
+                            gap = (boundary - ts.started_at).total_seconds()
+                            if gap > 0:
+                                running_timers.append((ts, gap))
+
+                if running_timers:
+                    lines = "\n".join(
+                        f"  \u2022 {ts.name}:  {format_time(ts.elapsed)}"
+                        f"  \u2192  {format_time(ts.elapsed + gap)}"
+                        for ts, gap in running_timers
+                    )
+                    msg = QMessageBox(self)
+                    msg.setWindowTitle("Session Recovery")
+                    msg.setIcon(QMessageBox.Question)
+                    msg.setText(
+                        "The previous session completed while the app was "
+                        "closed and some timers were still running.\n\n"
+                        "Would you like to add the elapsed time to the "
+                        "completed session?"
+                    )
+                    msg.setInformativeText(lines)
+                    add_btn = msg.addButton(
+                        "Add Elapsed Time && Save Session", QMessageBox.AcceptRole)
+                    msg.addButton(
+                        "Discard Elapsed && Save Session", QMessageBox.RejectRole)
+                    msg.exec()
+
+                    if msg.clickedButton() == add_btn:
+                        for ts, gap in running_timers:
+                            ts.elapsed += gap
+                            log.info(
+                                f"Added {gap:.0f}s recovery to timer "
+                                f"'{ts.name}' for completed session")
+
                 state = self._save_state()
                 save_completed_session(state, boundary)
                 for ts in self.timers.values():
                     ts.reset()
                 self._state.session_start = boundary
                 self._save_state()
-                time_str = boundary.strftime("%I:%M %p").lstrip("0")
+                time_str = boundary.strftime("%#I:%M %p")
                 self._pending_toast = f"Session saved and reset at {time_str}"
+
+        # 3. Recover time for timers that were running while the app was closed.
+        #    Only applies if the timer survived the daily reset above (i.e. no
+        #    boundary was crossed, so reset() was never called).
+        if self._state.settings.recover_running_time:
+            now = datetime.now().astimezone()
+            for ts in self.timers.values():
+                if ts.running and ts.started_at:
+                    gap = (now - ts.started_at).total_seconds()
+                    if gap > 0:
+                        ts.elapsed += gap
+                        ts.started_at = now
+                        log.info(f"Recovered {gap:.0f}s for timer '{ts.name}'")
 
     # ------------------------------------------------------------------ #
     #  Style                                                               #
@@ -712,6 +743,7 @@ class MainWindow(QMainWindow):
         s.always_on_top        = dlg.chosen_always_on_top
         s.confirm_delete       = dlg.chosen_confirm_delete
         s.confirm_reset        = dlg.chosen_confirm_reset
+        s.recover_running_time = dlg.chosen_recover_running_time
         old_dr_enabled = s.daily_reset_enabled
         old_dr_time    = s.daily_reset_time
         s.daily_reset_enabled  = dlg.chosen_daily_reset_enabled
@@ -885,8 +917,8 @@ class MainWindow(QMainWindow):
         t = THEMES.get(self._state.settings.theme, THEMES["Cupertino Light"])
         self._toast.setText(message)
         self._toast.setStyleSheet(
-            f"background-color: {t['separator']};"
-            f" color: {t['text']};"
+            f"background-color: {t.get('toast_bg', t['separator'])};"
+            f" color: {t.get('toast_fg', t['text'])};"
             f" padding: 3px 8px;")
         self._toast_opacity.setOpacity(1.0)
         self._toast_container.setVisible(True)
@@ -999,7 +1031,7 @@ class MainWindow(QMainWindow):
         self._state.session_start = boundary_dt
         self._try_snapshot(reason="daily_reset_rollover", priority="high")
 
-        time_str = boundary_dt.strftime("%I:%M %p").lstrip("0")
+        time_str = boundary_dt.strftime("%#I:%M %p")
         self.show_toast(f"Session saved and reset at {time_str}", 6)
 
     # ------------------------------------------------------------------ #

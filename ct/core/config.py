@@ -32,6 +32,7 @@ _SETTINGS_DEFAULTS = {
     "daily_reset_time":     "03:00",
     "snapshot_min_minutes": 5,
     "button_visibility":    "All",
+    "recover_running_time": True,
 }
 
 
@@ -52,6 +53,7 @@ class Settings:
     daily_reset_time:     str  = "03:00"
     snapshot_min_minutes: int  = 5
     button_visibility:    str  = "All"
+    recover_running_time: bool = True
 
     @classmethod
     def from_dict(cls, d: dict) -> "Settings":
