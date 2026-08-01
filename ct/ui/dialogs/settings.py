@@ -4,11 +4,21 @@ import json
 import re
 from datetime import datetime
 from pathlib import Path
-from PySide6.QtCore import Qt, QTime, QUrl
-from PySide6.QtGui import QDesktopServices, QFont, QFontMetrics
+from PySide6.QtCore import Qt, QPointF, QTime, QUrl, Signal
+from PySide6.QtGui import (
+    QColor,
+    QDesktopServices,
+    QFont,
+    QFontMetrics,
+    QPainter,
+    QPen,
+    QPolygonF,
+)
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QAbstractSpinBox,
+    QApplication,
+    QCheckBox,
     QComboBox,
     QDialog,
     QFrame,
@@ -22,6 +32,8 @@ from PySide6.QtWidgets import (
     QSizePolicy,
     QSpinBox,
     QStackedWidget,
+    QStyle,
+    QStyleOptionButton,
     QTableWidget,
     QTableWidgetItem,
     QTimeEdit,
@@ -31,6 +43,51 @@ from PySide6.QtWidgets import (
 from ct.common.setup import PATHS
 from ct.ui.theme import THEMES, SIZES, FONTS
 from ct.util import format_time
+
+
+class PreviewRow(QWidget):
+    """A timer row in the session preview — click it to copy its time."""
+
+    clicked = Signal()
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.LeftButton:
+            self.clicked.emit()
+        super().mousePressEvent(event)
+
+
+class TickCheckBox(QCheckBox):
+    """A checkbox that keeps its stylesheet-drawn box AND shows a tick.
+
+    Styling QCheckBox::indicator hands indicator painting to the stylesheet,
+    which draws the border/background but no check mark. So the base class
+    paints the box and the label, and we draw the tick over it ourselves.
+    """
+
+    def __init__(self, text, tick_color, parent=None):
+        super().__init__(text, parent)
+        self._tick_color = QColor(tick_color)
+
+    def paintEvent(self, event):
+        super().paintEvent(event)
+        if not self.isChecked():
+            return
+        opt = QStyleOptionButton()
+        self.initStyleOption(opt)
+        r = self.style().subElementRect(QStyle.SE_CheckBoxIndicator, opt, self)
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing)
+        pen = QPen(self._tick_color, max(1.6, r.height() * 0.16))
+        pen.setCapStyle(Qt.RoundCap)
+        pen.setJoinStyle(Qt.RoundJoin)
+        p.setPen(pen)
+        x, y, w, h = r.x(), r.y(), r.width(), r.height()
+        p.drawPolyline(QPolygonF([
+            QPointF(x + w * 0.24, y + h * 0.52),
+            QPointF(x + w * 0.43, y + h * 0.72),
+            QPointF(x + w * 0.77, y + h * 0.29),
+        ]))
+        p.end()
 
 
 def _format_span(start_iso, end_iso):
@@ -131,6 +188,11 @@ class ConfigDialog(QDialog):
 
         # Track which table is active so we can deselect the other
         self._active_table = None
+
+        # Session preview: hide timers that never ran (and groups made up
+        # entirely of them) unless the user asks to see them.
+        self._show_zero_times = False
+        self._preview_ctx = None
 
         self._positioned = False
 
@@ -459,9 +521,10 @@ class ConfigDialog(QDialog):
             title = f"Backup\n{span_str}"
         else:
             title = f"Completed Session\n{span_str}"
-        self._show_state_preview(paths[row], title)
+        self._show_state_preview(paths[row], title,
+                                 is_session=table is not self._snap_table)
 
-    def _show_state_preview(self, path, title=""):
+    def _show_state_preview(self, path, title="", is_session=False):
         """Load a state JSON file and display a read-only view in the preview panel."""
         try:
             with open(path, "r", encoding="utf-8") as f:
@@ -472,6 +535,30 @@ class ConfigDialog(QDialog):
 
         rows = data.get("layout", {}).get("rows", [])
         tracked = data.get("session", {}).get("tracked_times", {})
+        self._preview_ctx = (path, title, is_session)
+
+        def elapsed_of(row):
+            return tracked.get(str(row.get("rowid", "")), {}).get("elapsed", 0)
+
+        # Work out what to leave out. A timer is "zero" when it would render as
+        # 00:00:00; a group is dropped when every timer under it is zero (which
+        # includes a group with no timers at all).
+        hidden_rids = set()
+        if is_session and not self._show_zero_times:
+            group_children = {}
+            current_sep = None
+            for row in rows:
+                if row.get("type") == "separator":
+                    current_sep = row.get("rowid")
+                    group_children[current_sep] = []
+                else:
+                    if int(elapsed_of(row)) <= 0:
+                        hidden_rids.add(row.get("rowid"))
+                    if current_sep is not None:
+                        group_children[current_sep].append(row.get("rowid"))
+            for sep_rid, child_rids in group_children.items():
+                if all(c in hidden_rids for c in child_rids):
+                    hidden_rids.add(sep_rid)
 
         # Resolve theme for colors
         theme_name = self.chosen_theme
@@ -498,6 +585,22 @@ class ConfigDialog(QDialog):
             sep.setFixedHeight(1)
             lay.addWidget(sep)
 
+        if is_session:
+            zero_cb = TickCheckBox("Show Zero Times", t["row_running_fg"])
+            zero_cb.setFont(QFont("Calibri", 9))
+            zero_cb.setChecked(self._show_zero_times)
+            # Note the explicit QCheckBox selector: bare properties and
+            # selector rules can't be mixed in one stylesheet (it voids both).
+            # The box looks the same checked or not; TickCheckBox draws the
+            # tick on top, since a styled indicator loses Qt's native one.
+            zero_cb.setStyleSheet(
+                f"QCheckBox {{ color: {t['app_fg']}; background: transparent; }}"
+                f"QCheckBox::indicator {{ width: 13px; height: 13px;"
+                f" border: 1px solid {t['chrome_line']};"
+                f" background: {t['app_bg']}; }}")
+            zero_cb.toggled.connect(self._on_show_zero_times)
+            lay.addWidget(zero_cb)
+
         label_font = QFont("Calibri", 10)
         label_font_bold = QFont("Calibri", 10)
         label_font_bold.setBold(True)
@@ -514,6 +617,8 @@ class ConfigDialog(QDialog):
 
             if rtype == "separator":
                 current_sep_rid = rid
+                if rid in hidden_rids:
+                    continue
                 # Gather children that follow this separator and sum their time
                 children = []
                 found = False
@@ -566,23 +671,38 @@ class ConfigDialog(QDialog):
                     lambda _=False, r=rid: self._toggle_preview_group(r))
 
             else:
+                if rid in hidden_rids:
+                    continue
                 elapsed = tracked.get(str(rid), {}).get("elapsed", 0)
                 is_child = current_sep_rid is not None
 
-                timer_w = QWidget()
+                timer_w = PreviewRow()
                 timer_w.setObjectName(f"pvTmr{rid}")
+                # A plain QWidget ignores stylesheet backgrounds (and :hover)
+                # unless it is told to paint them.
+                timer_w.setAttribute(Qt.WA_StyledBackground, True)
                 rbg = row.get("bg") or t["app_bg"]
-                margin = "margin-left: 12px;" if is_child else ""
                 timer_w.setStyleSheet(
-                    f"#pvTmr{rid} {{ background-color: {rbg}; {margin} }}")
+                    f"#pvTmr{rid} {{ background-color: {rbg}; }}"
+                    f"#pvTmr{rid}:hover {{ background-color: {t['row_drag_bg']}; }}")
+                timer_w.setCursor(Qt.PointingHandCursor)
+                timer_w.setToolTip("Click to copy this time")
+                timer_w.clicked.connect(
+                    lambda n=name, e=elapsed: self._copy_row_time(n, e))
                 tmr_lay = QHBoxLayout(timer_w)
-                tmr_lay.setContentsMargins(4, 1, 4, 1)
+                # Indent the CONTENT, not the widget: a stylesheet margin
+                # would shift the painted background (and so the hover
+                # highlight) while leaving the labels where they were.
+                tmr_lay.setContentsMargins(16 if is_child else 4, 1, 4, 1)
                 tmr_lay.setSpacing(4)
 
                 name_lbl = QLabel(name)
                 name_lbl.setFont(label_font)
                 name_lbl.setStyleSheet(
                     f"color: {t['app_fg']}; background: transparent;")
+                # Labels must not swallow the mouse, or moving across them
+                # would drop the row out of :hover and eat the click.
+                name_lbl.setAttribute(Qt.WA_TransparentForMouseEvents, True)
                 tmr_lay.addWidget(name_lbl, 1)
 
                 time_lbl = QLabel(format_time(int(elapsed)))
@@ -590,6 +710,7 @@ class ConfigDialog(QDialog):
                 time_lbl.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
                 time_lbl.setStyleSheet(
                     f"color: {t['app_fg']}; background: transparent;")
+                time_lbl.setAttribute(Qt.WA_TransparentForMouseEvents, True)
                 tmr_lay.addWidget(time_lbl)
 
                 lay.addWidget(timer_w)
@@ -597,9 +718,33 @@ class ConfigDialog(QDialog):
                 if current_sep_rid is not None and current_sep_rid in self._preview_groups:
                     self._preview_groups[current_sep_rid][1].append(timer_w)
 
+        if not [r for r in rows if r.get("rowid") not in hidden_rids]:
+            empty_lbl = QLabel("Nothing was tracked in this session.")
+            empty_lbl.setFont(QFont("Calibri", 9))
+            empty_lbl.setAlignment(Qt.AlignCenter)
+            empty_lbl.setWordWrap(True)
+            empty_lbl.setStyleSheet(
+                f"color: {t['app_fg_muted']}; background: transparent;")
+            lay.addWidget(empty_lbl)
+
         lay.addStretch()
         self._preview_scroll.setWidget(content)
         self._preview_scroll.setVisible(True)
+
+    def _copy_row_time(self, name, elapsed):
+        """Copy a previewed timer's time, and say so on the main window."""
+        time_str = format_time(int(elapsed))
+        QApplication.clipboard().setText(time_str)
+        main = self.parentWidget()
+        if main is not None and hasattr(main, "show_toast"):
+            main.show_toast(
+                f"Time for {name} ({time_str}) copied to clipboard", 4)
+
+    def _on_show_zero_times(self, checked):
+        """Re-render the open session preview with or without zero-time rows."""
+        self._show_zero_times = checked
+        if self._preview_ctx is not None:
+            self._show_state_preview(*self._preview_ctx)
 
     def _toggle_preview_group(self, sep_rid):
         """Toggle collapse/expand of a group in the state preview."""

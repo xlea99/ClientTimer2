@@ -96,6 +96,7 @@ class MainWindow(QMainWindow):
         self._main_lay = QVBoxLayout(central)
         self._main_lay.setContentsMargins(0, 0, 0, 0)
 
+        self._time_labels    = {}    # time QLabel -> rowid, for click-to-copy
         self._grid_widget    = None  # created fresh each _rebuild_rows
         self._content_widget = None  # single swappable child: grid + footer
 
@@ -364,6 +365,7 @@ class MainWindow(QMainWindow):
     def _rebuild_rows_impl(self):
         """Tear down and recreate the entire grid: client rows + footer."""
         self._widgets.clear()
+        self._time_labels = {}   # time QLabel -> rowid, for click-to-copy
 
         # Build the entire new content (row grid + footer) fully offline as
         # ONE widget tree, then swap it into the window in a single adjacent
@@ -492,6 +494,17 @@ class MainWindow(QMainWindow):
                     row_container.setCursor(Qt.OpenHandCursor)
                     for child in row_container.findChildren(QPushButton):
                         child.setCursor(Qt.ArrowCursor)
+                elif not widget_dict.get("is_group"):
+                    # Click the time to copy it. Undo the blanket
+                    # transparent-for-mouse above for this one label so it can
+                    # hover and be clicked; in rearrange mode it stays
+                    # transparent so dragging by the time still works.
+                    tlbl = widget_dict.get("time")
+                    if tlbl is not None:
+                        tlbl.setAttribute(Qt.WA_TransparentForMouseEvents, False)
+                        tlbl.installEventFilter(self)
+                        tlbl.setCursor(Qt.PointingHandCursor)
+                        self._time_labels[tlbl] = rid
 
                 self._grid.addWidget(row_container)
 
@@ -583,6 +596,18 @@ class MainWindow(QMainWindow):
     def eventFilter(self, obj, event):
         if self._drag.active:
             return self._drag.handle_event(obj, event)
+
+        # The time label is its own hover/click target inside the row.
+        time_rid = self._time_labels.get(obj)
+        if time_rid is not None:
+            if event.type() == QEvent.Enter:
+                self._on_time_hover(time_rid, True)
+            elif event.type() == QEvent.Leave:
+                self._on_time_hover(time_rid, False)
+            elif (event.type() == QEvent.MouseButtonPress
+                  and event.button() == Qt.LeftButton):
+                self._copy_timer_time(time_rid)
+                return True
 
         if event.type() == QEvent.Enter:
             rid = self._drag.rid_for_container(obj)
@@ -724,6 +749,31 @@ class MainWindow(QMainWindow):
         f = name_lbl.font()
         f.setUnderline(entering)
         name_lbl.setFont(f)
+
+    def _on_time_hover(self, rid, entering):
+        """Hovering the time underlines the name AND the time.
+
+        Entering the label sends Leave to the row container, which clears the
+        name's underline — so re-apply it here to keep both marked.
+        """
+        if rid not in self._widgets:
+            return
+        for key in ("name", "time"):
+            lbl = self._widgets[rid].get(key)
+            if lbl is None:
+                continue
+            f = lbl.font()
+            f.setUnderline(entering)
+            lbl.setFont(f)
+
+    def _copy_timer_time(self, rid):
+        """Copy a live timer's current time to the clipboard, and toast it."""
+        if rid not in self.timers:
+            return
+        ts = self.timers[rid]
+        time_str = format_time(ts.current_elapsed)
+        QApplication.clipboard().setText(time_str)
+        self.show_toast(f"Time for {ts.name} ({time_str}) copied to clipboard", 4)
 
     def _on_row_context_menu(self, rowid, global_pos):
         row = next((r for r in self._state.rows if r["rowid"] == rowid), None)

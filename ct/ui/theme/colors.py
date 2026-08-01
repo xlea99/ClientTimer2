@@ -10,7 +10,7 @@
 #   chrome_*   structural rules: footer rule, tooltip border, scrollbar, gridlines
 #   toast_*    the transient notification bubble
 #
-# control_border_px is a width in pixels, not a color — 0 for soft themes,
+# control_border_px is a wicopying dth in pixels, not a color — 0 for soft themes,
 # 1 for themes with hard edges. control_line is the color that width paints in
 # (and the always-on 1px edge around lists, tables and menus).
 THEMES = {
