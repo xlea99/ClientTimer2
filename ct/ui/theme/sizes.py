@@ -8,6 +8,8 @@ SIZES = {
         "frame_pad": 0,
         "h_spacing": 1,
         "v_spacing": 1,
+        "line_gap": 1,
+        "footer_gap": 1,
     },
     "Tiny": {
         "label": 10,
@@ -17,6 +19,8 @@ SIZES = {
         "frame_pad": 0,
         "h_spacing": 3,
         "v_spacing": 2,
+        "line_gap": 2,
+        "footer_gap": 2,
     },
     "Compact": {
         "label": 12,
@@ -26,6 +30,8 @@ SIZES = {
         "frame_pad": 3,
         "h_spacing": 4,
         "v_spacing": 3,
+        "line_gap": 4,
+        "footer_gap": 3,
     },
     "Regular": {
         "label": 14,
@@ -35,6 +41,8 @@ SIZES = {
         "frame_pad": 5,
         "h_spacing": 6,
         "v_spacing": 4,
+        "line_gap": 4,
+        "footer_gap": 4,
     },
     "Bulky": {
         "label": 16,
@@ -44,6 +52,8 @@ SIZES = {
         "frame_pad": 5,
         "h_spacing": 7,
         "v_spacing": 5,
+        "line_gap": 5,
+        "footer_gap": 5,
     },
     "Colossal": {
         "label": 18,
@@ -53,6 +63,8 @@ SIZES = {
         "frame_pad": 7,
         "h_spacing": 8,
         "v_spacing": 6,
+        "line_gap": 6,
+        "footer_gap": 6,
     },
     "Gargantuan": {
         "label": 22,
@@ -62,5 +74,7 @@ SIZES = {
         "frame_pad": 9,
         "h_spacing": 10,
         "v_spacing": 7,
+        "line_gap": 8,
+        "footer_gap": 7,
     },
 }

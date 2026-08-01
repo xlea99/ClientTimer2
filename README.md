@@ -158,7 +158,6 @@ In the **Appearance** tab:
 
 What kind of themes will you find? Only everything you could ever possibly want, and likely a fair bit more:
 
-- *Cupertino Light* - "I don't purchase electronics that don't have a fruit logo on them."
 - *Galaxy Dark* - "I'm not like the normies. I'm special and I'm different."
 - *A Way* - "When I am actually at my desk, I want my monitor to look like a bee got trapped in it."
 - *Black Herizons* - "Brutalistic reds and blacks that will make you feel like the resident cool guy."

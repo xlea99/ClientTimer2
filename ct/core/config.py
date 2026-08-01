@@ -1,6 +1,7 @@
 import copy
 import dataclasses
 import json
+import os
 from pathlib import Path
 from dataclasses import dataclass
 from datetime import datetime
@@ -14,32 +15,50 @@ _STATE_PATH = PATHS.current / "state.json"
 _OLD_CONFIG = PATHS.old / "config.txt"
 
 # ---------------------------------------------------------------------------
-# Settings defaults — single source of truth for all setting keys/values
+# Settings — the dataclass is the single source of truth for keys/defaults
 # ---------------------------------------------------------------------------
 
-_SETTINGS_DEFAULTS = {
-    "theme":                "Cupertino Light",
-    "size":                 "Regular",
-    "font":                 "Calibri",
-    "label_align":          "Left",
-    "client_separators":    True,
-    "show_group_count":     True,
-    "show_group_time":      True,
-    "always_on_top":        True,
-    "confirm_delete":       True,
-    "confirm_reset":        True,
-    "daily_reset_enabled":  True,
-    "daily_reset_time":     "03:00",
-    "snapshot_min_minutes": 5,
-    "button_visibility":    "All",
-    "recover_running_time": True,
-}
+# Coerces a raw settings value to the type of its default, honoring reasonable
+# hand-edits (0/1 or "true"/"false" for bools, numeric strings for ints)
+# instead of discarding them. Values that can't be sensibly interpreted fall
+# back to the default. Anything other than a clean pass is logged as a plain-
+# English warning — users do read these logs. Type-checking only: string
+# values are never validated against THEMES/SIZES/etc., so settings from
+# other app versions survive a load/save round trip.
+# Returns (value, changed) — changed is True for any coercion or reset.
+def _coerce_setting(key, value, default):
+    target = type(default)
+    if target is bool:
+        if isinstance(value, bool):
+            return value, False
+        if isinstance(value, int) and value in (0, 1):
+            log.warning(f"Setting '{key}' was {value} — read as {bool(value)}.")
+            return bool(value), True
+        if isinstance(value, str) and value.strip().lower() in ("true", "false", "1", "0"):
+            result = value.strip().lower() in ("true", "1")
+            log.warning(f"Setting '{key}' was '{value}' (text) — read as {result}.")
+            return result, True
+    elif target is int:
+        if isinstance(value, int) and not isinstance(value, bool):
+            return value, False
+        if isinstance(value, (str, float)):
+            try:
+                result = int(float(value))
+                log.warning(f"Setting '{key}' was {value!r} — read as {result}.")
+                return result, True
+            except (ValueError, OverflowError):
+                pass
+    elif target is str:
+        if isinstance(value, str):
+            return value, False
+    log.warning(f"Setting '{key}' was {value!r}, which couldn't be interpreted — reset to default {default!r}.")
+    return default, True
 
 
 @dataclass
 class Settings:
     """All user-configurable settings as a typed, dot-accessible object."""
-    theme:                str  = "Cupertino Light"
+    theme:                str  = "E-Ink (Default)"
     size:                 str  = "Regular"
     font:                 str  = "Calibri"
     label_align:          str  = "Left"
@@ -57,10 +76,27 @@ class Settings:
 
     @classmethod
     def from_dict(cls, d: dict) -> "Settings":
-        return cls(**{k: d.get(k, v) for k, v in _SETTINGS_DEFAULTS.items()})
+        values = {}
+        coerced = []
+        for k, default in _SETTINGS_DEFAULTS.items():
+            if k in d:
+                values[k], changed = _coerce_setting(k, d[k], default)
+                if changed:
+                    coerced.append(k)
+            else:
+                values[k] = default
+        obj = cls(**values)
+        # Plain attribute, not a field — never serialized by to_dict().
+        # MainWindow reads this at startup to toast the user about it.
+        obj.coerced_keys = coerced
+        return obj
 
     def to_dict(self) -> dict:
         return dataclasses.asdict(self)
+
+
+# Derived from the dataclass so defaults live in exactly one place.
+_SETTINGS_DEFAULTS = {f.name: f.default for f in dataclasses.fields(Settings)}
 
 
 # ---------------------------------------------------------------------------
@@ -107,6 +143,7 @@ class AppState:
         self.session_start    = session_start
         self.tracked_times    = tracked_times     # used only during MainWindow.__init__
         self.migrated_from_ct1 = None             # set by load() if CT1 migration occurred
+        self.theme_renamed = False                # set by load() if a retired theme was migrated
 
     # Helper to build the full state dict from current live data.
     def _serialize(self, timers: dict) -> dict:
@@ -114,8 +151,11 @@ class AppState:
         for rid, ts in timers.items():
             ts.freeze()
             entry = {"elapsed": ts.elapsed}
-            if ts.running and ts.started_at:
-                entry["running_since"] = ts.started_at.isoformat()
+            if ts.running:
+                # freeze() above makes elapsed current as of this save, so the
+                # recovery baseline is the save moment — using started_at here
+                # would double-count everything between start and last save.
+                entry["running_since"] = now_iso()
             tracked[str(rid)] = entry
         return {
             "meta": {
@@ -135,28 +175,38 @@ class AppState:
         }
 
     # Loads the current unified state from PATHS.current / state.json, ensuring the schema is valid and handling
-    # default fallbacks.
+    # default fallbacks. Loading the default state.json never fails (falls back to a fresh state); loading an
+    # explicit path (e.g. a snapshot restore) raises on a missing/unreadable file so callers can bail out safely.
     @classmethod
     def load(cls, path: Path = _STATE_PATH) -> "AppState":
+        is_default_path = (path == _STATE_PATH)
         try:
             # If the save doesn't yet exist, we check if there's an old ClientTimer1 install to migrate from. If so,
             # it gets built using those clients/sizing. Otherwise, a full fresh default state is built.
             if not path.exists():
-                try:
-                    if path != _STATE_PATH:
-                        raise FileNotFoundError
-                except FileNotFoundError:
-                    log.exception(f"Tried to load a specified a file other than the current state.json, but file was not found: {path}")
-                    raise
+                if not is_default_path:
+                    raise FileNotFoundError(f"State file not found: {path}")
                 state = cls._build_default_state()
+                # Revert any installer rename of config.txt.migrated
+                # back to config.txt so migration can find it.
+                migrated = _OLD_CONFIG.parent / "config.txt.migrated"
+                if not _OLD_CONFIG.exists() and migrated.exists():
+                    try:
+                        migrated.rename(_OLD_CONFIG)
+                        log.info("Reverted config.txt.migrated back to config.txt.")
+                    except OSError:
+                        log.warning("Could not revert config.txt.migrated.", exc_info=True)
                 if _OLD_CONFIG.exists():
+                    # A partial/corrupt config.txt may be missing any of these
+                    # keys — fall back to the fresh-state defaults rather than
+                    # crashing on startup.
                     migration = read_old_config(_OLD_CONFIG)
-                    for i, timer in enumerate(migration["Timers"]):
+                    for i, timer in enumerate(migration.get("Timers", [])):
                         state["layout"]["rows"].append({
                             "rowid": i, "name": timer, "type": "timer", "bg": None,
                         })
-                    state["settings"]["size"]  = migration["Size"]
-                    state["settings"]["theme"] = migration["Theme"]
+                    state["settings"]["size"]  = migration.get("Size", state["settings"]["size"])
+                    state["settings"]["theme"] = migration.get("Theme", state["settings"]["theme"])
                     state["_migrated_from_ct1"] = migration
                     log.info("Migrated state from ClientTimer1 config.txt.")
                 else:
@@ -219,11 +269,27 @@ class AppState:
                 else:
                     log.info(f"Loaded state from '{path}'.")
         except (FileNotFoundError, json.JSONDecodeError, OSError, TypeError):
+            if not is_default_path:
+                log.exception(f"Failed to load state from '{path}'.")
+                raise
             log.warning("Error loading state.json; falling back to fresh state.", exc_info=True)
             state = cls._build_default_state()
 
         # Hydrate the validated dict into typed fields
         settings  = Settings.from_dict(state["settings"])
+        # Retired/renamed themes — migrate saved references so old installs
+        # land on a real theme, not a ghost name. Only the Cupertino
+        # retirement is toast-worthy; the E-Ink rename is cosmetic.
+        _THEME_RENAMES = {
+            "Cupertino Light":       "E-Ink (Default)",
+            "E-Ink":                 "E-Ink (Default)",
+            "Pretty In Pink-Mobile": "Ring Around The Rosie",
+        }
+        theme_renamed = settings.theme == "Cupertino Light"
+        if settings.theme in _THEME_RENAMES:
+            new_name = _THEME_RENAMES[settings.theme]
+            log.info(f"Migrated theme '{settings.theme}' to '{new_name}'.")
+            settings.theme = new_name
         rows      = list(state["layout"]["rows"])
         collapsed = set(state["layout"]["collapsed_groups"])
         try:
@@ -233,12 +299,17 @@ class AppState:
         tracked = state["session"]["tracked_times"]
         obj = cls(settings, rows, collapsed, start, tracked)
         obj.migrated_from_ct1 = state.get("_migrated_from_ct1")
+        obj.theme_renamed = theme_renamed
         return obj
     # Serialize and write state to disk. Returns the state dict.
     def save(self, timers: dict) -> dict:
         state = self._serialize(timers)
-        with open(_STATE_PATH, "w", encoding="utf-8") as f:
+        # Write to a temp file and atomically replace, so a crash mid-write
+        # can't corrupt state.json.
+        tmp_path = _STATE_PATH.with_suffix(".json.tmp")
+        with open(tmp_path, "w", encoding="utf-8") as f:
             json.dump(state, f, indent=2)
+        os.replace(tmp_path, _STATE_PATH)
         log.info(f"Saved state to '{_STATE_PATH}'.")
         return state
 

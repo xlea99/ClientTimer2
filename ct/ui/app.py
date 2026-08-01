@@ -32,7 +32,10 @@ from ct.ui.ui_blueprint import UIBlueprint
 from ct.ui.row_factory import RowFactory
 from ct.util import format_time
 
-_SANITIZE = re.compile(r"[^a-zA-Z0-9\s'.]+")
+# Permissive denylist: real client names use unicode, '&', '-', ',', etc.
+# Only control characters are stripped — name labels render as PlainText so
+# nothing else needs escaping.
+_SANITIZE = re.compile(r"[\x00-\x1f\x7f-\x9f]+")
 
 
 
@@ -93,7 +96,8 @@ class MainWindow(QMainWindow):
         self._main_lay = QVBoxLayout(central)
         self._main_lay.setContentsMargins(0, 0, 0, 0)
 
-        self._grid_widget = None  # created fresh each _rebuild_rows
+        self._grid_widget    = None  # created fresh each _rebuild_rows
+        self._content_widget = None  # single swappable child: grid + footer
 
         # -- Toast notification bar --
         self._toast_container = QWidget()
@@ -106,11 +110,23 @@ class MainWindow(QMainWindow):
         self._toast.setAlignment(Qt.AlignCenter)
         self._toast.setFont(QFont("Calibri", 9))
         self._toast.setContentsMargins(4, 2, 4, 2)
+        self._toast.setWordWrap(True)
         toast_lay.addWidget(self._toast)
 
         self._toast_opacity = QGraphicsOpacityEffect(self._toast_container)
         self._toast_container.setGraphicsEffect(self._toast_opacity)
         self._toast_opacity.setOpacity(1.0)
+
+        # Single persistent timer: restarting it cancels the previous
+        # deadline, so a new toast can't be faded early by an old one's.
+        self._toast_fade  = None
+        self._toast_timer = QTimer(self)
+        self._toast_timer.setSingleShot(True)
+        self._toast_timer.timeout.connect(self._fade_toast)
+
+        # Toast is parented once and stays last in the layout forever —
+        # rebuilds insert content above it instead of re-adding it.
+        self._main_lay.addWidget(self._toast_container)
 
         self._apply_style()
         self._rebuild_rows()
@@ -137,6 +153,19 @@ class MainWindow(QMainWindow):
         """All pre-UI initialization: migration, daily reset catch-up, etc."""
         self._pending_toast = None
 
+        # 0. If any saved settings couldn't be understood (hand-edited
+        #    state.json), let the user know. Set first so the daily-reset
+        #    toast below wins if both fire.
+        if getattr(self._state.settings, "coerced_keys", []):
+            self._pending_toast = (
+                "Some saved settings couldn't be read and were adjusted — see log")
+
+        # 0.5. Retired-theme migration notice (takes priority over the above).
+        if getattr(self._state, "theme_renamed", False):
+            self._pending_toast = (
+                "Cupertino Light has found its way to theme heaven. You've been moved to E-Ink. "
+                "16 other themes exist in settings.")
+
         # 1. CT1 migration notification
         #    Migration data is handled in AppState.load(). The old config.txt
         #    is left intact as a permanent migration source — the installer
@@ -144,15 +173,52 @@ class MainWindow(QMainWindow):
         if self._state.migrated_from_ct1:
             m = self._state.migrated_from_ct1
             timers = ", ".join(m.get("Timers", []))
-            QMessageBox.information(
-                self,
-                "Welcome to Client Timer 2",
-                f"Your Client Timer 1 data has been migrated!\n\n"
-                f"Timers: {timers}\n"
-                f"Theme: {m.get('Theme', 'Cupertino Light')}\n"
-                f"Size: {m.get('Size', 'Regular')}",
-            )
+            ct1_times = m.get("Times", {})
+
+            if ct1_times:
+                # Build a summary of the times we found
+                lines = "\n".join(
+                    f"  \u2022 {name}: {format_time(secs)}"
+                    for name, secs in ct1_times.items() if secs > 0
+                )
+                msg = QMessageBox(self)
+                msg.setWindowTitle("Welcome to Client Timer 2")
+                msg.setIcon(QMessageBox.Question)
+                msg.setText(
+                    f"Your Client Timer 1 data has been migrated!\n\n"
+                    f"Timers: {timers}\n"
+                    f"Theme: {m.get('Theme', 'E-Ink (Default)')}\n"
+                    f"Size: {m.get('Size', 'Regular')}\n\n"
+                    f"CT1 has existing times on these clients.\n"
+                    f"Would you like to carry them over?"
+                )
+                msg.setInformativeText(lines)
+                yes_btn = msg.addButton(
+                    "Migrate Times", QMessageBox.AcceptRole)
+                msg.addButton(
+                    "Start Fresh", QMessageBox.RejectRole)
+                msg.exec()
+
+                if msg.clickedButton() == yes_btn:
+                    for ts in self.timers.values():
+                        if ts.name in ct1_times and ct1_times[ts.name] > 0:
+                            ts.elapsed = float(ct1_times[ts.name])
+                            log.info(f"Migrated {ct1_times[ts.name]}s for "
+                                     f"timer '{ts.name}' from CT1")
+            else:
+                QMessageBox.information(
+                    self,
+                    "Welcome to Client Timer 2",
+                    f"Your Client Timer 1 data has been migrated!\n\n"
+                    f"Timers: {timers}\n"
+                    f"Theme: {m.get('Theme', 'E-Ink (Default)')}\n"
+                    f"Size: {m.get('Size', 'Regular')}",
+                )
             self._state.migrated_from_ct1 = None
+            # Persist immediately — this materializes state.json, so a crash
+            # before the first autosave can't re-run the migration prompt or
+            # lose the user's carry-over choice.
+            self._save_state()
 
         # 2. Daily reset catch-up — if the app was closed and we missed a
         #    reset boundary, save the old session and zero out timers.
@@ -236,7 +302,10 @@ class MainWindow(QMainWindow):
         self._main_lay.setContentsMargins(
             s["frame_pad"], s["frame_pad"], s["frame_pad"], s["frame_pad"]
         )
-        self._main_lay.setSpacing(s["padding"])
+        # Gaps between grid / footer / toast are controlled explicitly
+        # (footer_gap on the footer, padding above the toast), not globally.
+        self._main_lay.setSpacing(0)
+        self._toast_container.layout().setContentsMargins(0, s["padding"], 0, 0)
 
     # ------------------------------------------------------------------ #
     #  Group helpers                                                       #
@@ -282,30 +351,44 @@ class MainWindow(QMainWindow):
     # ------------------------------------------------------------------ #
 
     def _rebuild_rows(self):
+        # Suppress painting during teardown/rebuild — the grid and footer are
+        # separate children of the top-level layout now, and swapping them can
+        # flush a partially-built frame to screen (a one-frame flicker on
+        # drag-drop). Batch everything into a single repaint.
+        self.setUpdatesEnabled(False)
+        try:
+            self._rebuild_rows_impl()
+        finally:
+            self.setUpdatesEnabled(True)
+
+    def _rebuild_rows_impl(self):
         """Tear down and recreate the entire grid: client rows + footer."""
         self._widgets.clear()
 
-        if self._grid_widget is not None:
-            self._main_lay.removeWidget(self._grid_widget)
-            self._grid_widget.setParent(None)
-            self._grid_widget.deleteLater()
-
-        # Remove toast from layout before re-adding (keeps it at the bottom)
-        self._main_lay.removeWidget(self._toast_container)
+        # Build the entire new content (row grid + footer) fully offline as
+        # ONE widget tree, then swap it into the window in a single adjacent
+        # remove/insert. Swapping grid/footer as separate top-level layout
+        # children lets Qt flush a partial frame between event-loop
+        # iterations — the drag-drop flicker.
+        content = QWidget()
+        content_lay = QVBoxLayout(content)
+        content_lay.setContentsMargins(0, 0, 0, 0)
+        content_lay.setSpacing(0)
 
         self._grid_widget = QWidget()
         self._grid = QVBoxLayout(self._grid_widget)
         self._grid.setContentsMargins(0, 0, 0, 0)
-        self._main_lay.addWidget(self._grid_widget)
-        self._main_lay.addWidget(self._toast_container)
+        content_lay.addWidget(self._grid_widget)
 
         ss = self._state.settings
-        t  = THEMES.get(ss.theme, THEMES["Cupertino Light"])
+        t  = THEMES.get(ss.theme, THEMES["E-Ink (Default)"])
         s  = SIZES.get(ss.size, SIZES["Regular"])
 
         self._grid.setSpacing(s.get("v_spacing", s["padding"]))
 
         blueprint = UIBlueprint.compute(t, s, ss.font, self._state.rows, self._has_mdl2)
+
+        bottom_merged = False  # last row hosts the footer line itself
 
         if not self._state.rows:
             lbl = QLabel("No clients. Add one to begin!")
@@ -367,6 +450,12 @@ class MainWindow(QMainWindow):
                     needs_sep = (ss.client_separators
                                  and idx < len(visible_entries) - 1
                                  and visible_entries[idx + 1][0]["type"] == "timer")
+                    # Bottom-most row: replace its client separator with the
+                    # thick footer line instead of stacking both.
+                    is_footer_row = (ss.client_separators
+                                     and idx == len(visible_entries) - 1)
+                    if is_footer_row:
+                        bottom_merged = True
 
                     timer_state = self.timers[rid]
                     row_container, widget_dict = RowFactory.timer(
@@ -376,6 +465,9 @@ class MainWindow(QMainWindow):
                         is_child=is_child,
                         is_dragging=self._drag.dragging_rid == rid,
                         draw_separator_line=needs_sep,
+                        footer_line=is_footer_row,
+                        force_line_gap=(self._rearranging
+                                        and ss.client_separators),
                         on_start=self._on_start,
                         on_stop=self._on_stop,
                         on_adjust=self._on_adjust,
@@ -403,11 +495,12 @@ class MainWindow(QMainWindow):
 
                 self._grid.addWidget(row_container)
 
-        # Footer separator
-        if self._state.rows:
+        # Footer separator — standalone only when the bottom row doesn't
+        # already carry it (separators off, or last visible row is a group).
+        if self._state.rows and not bottom_merged:
             sep = QWidget()
             sep.setFixedHeight(2)
-            sep.setStyleSheet(f"background-color: {t['separator']};")
+            sep.setStyleSheet(f"background-color: {t['chrome_line']};")
             self._grid.addWidget(sep)
 
         # Footer
@@ -424,8 +517,25 @@ class MainWindow(QMainWindow):
         self._add_group_btn  = fw["add_group_btn"]
         self._add_input      = fw["add_input"]
         self._cfg_btn        = fw["cfg_btn"]
-        self._grid.addWidget(footer)
+        # Footer sits outside the row grid so its gap above is governed by
+        # the per-size "footer_gap", independent of v_spacing.
+        footer.layout().setContentsMargins(
+            0, s.get("footer_gap", s["v_spacing"]), 0, 0)
+        content_lay.addWidget(footer)
 
+        # Atomic swap — old content out, new content in, toast stays last.
+        old_content = self._content_widget
+        self._content_widget = content
+        if old_content is not None:
+            self._main_lay.removeWidget(old_content)
+            old_content.setParent(None)
+            old_content.deleteLater()
+        self._main_lay.insertWidget(0, content)
+        # Show it NOW (it is parented, so this is safe — never setVisible a
+        # parentless widget). Qt would otherwise only show it on the next
+        # event-loop turn, and until then QLayout skips it when measuring, so
+        # the window's size hint reads 0x0.
+        content.setVisible(True)
 
         QTimer.singleShot(0, self._sync_footer_heights)
 
@@ -501,14 +611,17 @@ class MainWindow(QMainWindow):
             self._start_additional(rowid)
         else:
             self._start_exclusive(rowid)
+        self._save_state()
 
     def _on_stop(self, rowid):
         self._stop_one(rowid)
+        self._save_state()
 
     def _on_adjust(self, rowid, direction):
         minutes = 1 if (QApplication.keyboardModifiers() & Qt.ShiftModifier) else 5
         self.timers[rowid].adjust(direction * minutes * 60)
         self._update_display(rowid)
+        self._update_parent_group_time(rowid)
         self._save_state()
 
     def _on_add(self):
@@ -574,6 +687,8 @@ class MainWindow(QMainWindow):
             self.timers[rowid].reset()
             self._set_bold(rowid, False)
             self._update_display(rowid)
+            self._update_parent_group_time(rowid)
+            self._save_state()
         else:
             if self._state.settings.confirm_delete:
                 name = next(
@@ -594,6 +709,9 @@ class MainWindow(QMainWindow):
     def _on_rearrange_toggle(self):
         self._rearranging = not self._rearranging
         self._rebuild_rows()
+        # Rearrange mode gives every row a uniform line_gap so drags never
+        # resize anything — absorb that height change here, at the toggle.
+        self.adjustSize()
 
     # ------------------------------------------------------------------ #
     #  Hover and context menu                                              #
@@ -680,10 +798,8 @@ class MainWindow(QMainWindow):
                     if was_running:
                         ts.start()
                     self._update_display(rowid)
-                    parent = self._parent_group(rowid)
-                    if parent is not None and parent in self._widgets:
-                        self._widgets[parent]["time"].setText(
-                            format_time(self._group_total_time(parent)))
+                    self._update_parent_group_time(rowid)
+                    self._save_state()
         elif action == delete_action:
             if self._state.settings.confirm_delete:
                 if QMessageBox.question(
@@ -776,8 +892,14 @@ class MainWindow(QMainWindow):
                 self.show()
 
     def _restore_from_snapshot(self, path: Path):
+        try:
+            new_state = AppState.load(path)
+        except Exception:
+            log.exception(f"Failed to restore from snapshot '{path}'.")
+            self.show_toast("Restore failed — current state unchanged", 5)
+            return
         self._stop_all()
-        self._state = AppState.load(path)
+        self._state = new_state
         self._next_rowid = max(
             (r["rowid"] for r in self._state.rows), default=-1) + 1
         self.timers = {}
@@ -833,6 +955,7 @@ class MainWindow(QMainWindow):
             self._stop_all()
             for ts in self.timers.values():
                 ts.reset()
+            self._save_state()
             self._rebuild_rows()
             self.show_toast("Reset all times to zero.")
 
@@ -846,9 +969,9 @@ class MainWindow(QMainWindow):
         if not w or w.get("is_group"):
             return
 
-        t         = THEMES.get(self._state.settings.theme, THEMES["Cupertino Light"])
-        normal_fg = t["text"]
-        running_fg = t.get("running_text", normal_fg)
+        t         = THEMES.get(self._state.settings.theme, THEMES["E-Ink (Default)"])
+        normal_fg = t["app_fg"]
+        running_fg = t["row_running_fg"]
         color     = running_fg if bold else normal_fg
 
         for key in ("name", "time"):
@@ -877,9 +1000,9 @@ class MainWindow(QMainWindow):
             if cid in self.timers
         )
 
-        t          = THEMES.get(self._state.settings.theme, THEMES["Cupertino Light"])
-        normal_fg  = t.get("group_header_text", t["text"])
-        running_fg = t.get("group_running_text", normal_fg)
+        t          = THEMES.get(self._state.settings.theme, THEMES["E-Ink (Default)"])
+        normal_fg  = t["group_fg"]
+        running_fg = t["group_running_fg"]
         color      = running_fg if has_running else normal_fg
 
         w = self._widgets[group_rowid]
@@ -896,34 +1019,58 @@ class MainWindow(QMainWindow):
                 format_time(self.timers[rowid].current_elapsed)
             )
 
+    def _update_parent_group_time(self, rowid):
+        """Refresh the parent separator's total after a child's time changed."""
+        parent = self._parent_group(rowid)
+        if parent is not None and parent in self._widgets:
+            self._widgets[parent]["time"].setText(
+                format_time(self._group_total_time(parent)))
+
     def _update_all_displays(self):
         for rid in self.timers:
             self._update_display(rid)
 
     def _shrink_to_fit(self):
         """Resize window to tightly fit its contents (allows shrinking)."""
-        grid_hint = self._grid_widget.sizeHint()
-        margins = self._main_lay.contentsMargins()
-        target_w = grid_hint.width() + margins.left() + margins.right()
-        target_h = grid_hint.height() + margins.top() + margins.bottom()
-        extra_h = self.height() - self.centralWidget().height()
-        extra_w = self.width() - self.centralWidget().width()
+        # The central widget's hint covers grid + footer + margins — the
+        # footer no longer lives inside the grid, so measure the whole thing.
+        cw = self.centralWidget()
+        cw.layout().activate()          # hint is stale until the layout runs
+        hint = cw.sizeHint()
+        if hint.isEmpty():
+            # Nothing measurable yet. Resizing to 0x0 here would make Windows
+            # hide the window outright — the taskbar button vanishes and pops
+            # back a frame later. Let Qt size it instead.
+            self.adjustSize()
+            return
+        extra_h = self.height() - cw.height()
+        extra_w = self.width() - cw.width()
         self.setMinimumSize(0, 0)
-        self.centralWidget().setMinimumSize(0, 0)
-        self.resize(target_w + extra_w, target_h + extra_h)
+        cw.setMinimumSize(0, 0)
+        self.resize(hint.width() + extra_w, hint.height() + extra_h)
 
     def show_toast(self, message, seconds=5):
         """Show a transient notification at the bottom of the window."""
-        t = THEMES.get(self._state.settings.theme, THEMES["Cupertino Light"])
+        # Cancel any in-flight fade so it can't hide the new toast.
+        if self._toast_fade is not None:
+            self._toast_fade.stop()
+            self._toast_fade = None
+        t = THEMES.get(self._state.settings.theme, THEMES["E-Ink (Default)"])
         self._toast.setText(message)
         self._toast.setStyleSheet(
-            f"background-color: {t.get('toast_bg', t['separator'])};"
-            f" color: {t.get('toast_fg', t['text'])};"
+            f"background-color: {t['toast_bg']};"
+            f" color: {t['toast_fg']};"
             f" padding: 3px 8px;")
         self._toast_opacity.setOpacity(1.0)
+        # Cap the toast at the window's current width so long messages wrap
+        # downward instead of widening the window.
+        margins = self._main_lay.contentsMargins()
+        avail = self.centralWidget().width() - margins.left() - margins.right()
+        if avail > 50:
+            self._toast.setMaximumWidth(avail)
         self._toast_container.setVisible(True)
         self.adjustSize()
-        QTimer.singleShot(int(seconds * 1000), self._fade_toast)
+        self._toast_timer.start(int(seconds * 1000))
 
     def _fade_toast(self):
         self._toast_fade = QPropertyAnimation(self._toast_opacity, b"opacity")

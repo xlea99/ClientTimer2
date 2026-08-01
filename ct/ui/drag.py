@@ -180,7 +180,7 @@ class DragController:
 
         from ct.ui.theme import THEMES, SIZES
         ss = h._state.settings
-        t  = THEMES.get(ss.theme, THEMES["Cupertino Light"])
+        t  = THEMES.get(ss.theme, THEMES["E-Ink (Default)"])
         s  = SIZES.get(ss.size, SIZES["Regular"])
 
         current_group_rid = None
@@ -222,7 +222,7 @@ class DragController:
         bold_label = QFont(ss.font, s["label"])
         bold_label.setBold(True)
         indent_px        = QFontMetrics(bold_label).horizontalAdvance("  ")
-        group_header_bg  = t.get("group_header_bg", t["bg"])
+        group_bg  = t["group_bg"]
 
         h._grid_widget.setUpdatesEnabled(False)
 
@@ -237,12 +237,12 @@ class DragController:
             container = h._widgets[rid]["container"]
 
             if row["type"] == "separator":
-                row_bg = row.get("bg") or group_header_bg
+                row_bg = row.get("bg") or group_bg
             else:
-                row_bg = row.get("bg") or t["bg"]
+                row_bg = row.get("bg") or t["app_bg"]
 
             if self.dragging_rid == rid:
-                row_bg = t["row_dragged"]
+                row_bg = t["row_drag_bg"]
 
             margin_css = (f"margin-left: {indent_px - 3}px;"
                           if row["type"] == "timer" and is_child else "")
@@ -251,15 +251,22 @@ class DragController:
                          and insert_idx < len(visible_entries) - 1
                          and row["type"] == "timer"
                          and visible_entries[insert_idx + 1][0]["type"] == "timer")
+            is_footer_row = (ss.client_separators
+                             and row["type"] == "timer"
+                             and insert_idx == len(visible_entries) - 1)
 
-            border_css = (f"border-bottom: 1px solid {t['row_separator']};"
-                          if needs_sep else "")
+            if is_footer_row:
+                border_css = f"border-bottom: 2px solid {t['chrome_line']};"
+            elif needs_sep:
+                border_css = f"border-bottom: 1px solid {t['row_line']};"
+            else:
+                border_css = ""
 
             if row["type"] == "separator":
-                group_border = t.get("group_border", row_bg)
+                group_line = t["group_line"]
                 container.setStyleSheet(
                     f"#rowBg {{ background-color: {row_bg}; {margin_css}"
-                    f" border: 2px solid {group_border}; }}")
+                    f" border: 2px solid {group_line}; }}")
             else:
                 container.setStyleSheet(
                     f"#rowBg {{ background-color: {row_bg}; {margin_css} {border_css} }}")

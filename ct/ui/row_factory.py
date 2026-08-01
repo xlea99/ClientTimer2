@@ -39,17 +39,17 @@ class RowFactory:
 
         # Calculate what the row_bg should be based on if its being dragged and/or if there's a user-set background color
         if is_dragging:
-            row_bg = blueprint.theme["row_dragged"]
+            row_bg = blueprint.theme["row_drag_bg"]
         else:
-            row_bg = row.get("bg") or blueprint.theme["group_header_bg"]
+            row_bg = row.get("bg") or blueprint.theme["group_bg"]
 
         # Build the row's contaner
-        group_border = blueprint.theme.get("group_border", row_bg)
+        group_line = blueprint.theme["group_line"]
         row_container = QWidget()
         row_container.setObjectName("rowBg")
         row_container.setStyleSheet(
             f"#rowBg {{ background-color: {row_bg}; {margin_css}"
-            f" border: 2px solid {group_border}; }}")
+            f" border: 2px solid {group_line}; }}")
         row_container_layout = QHBoxLayout(row_container)
         row_container_layout.setContentsMargins(3, 3, 3, 3)
         row_container_layout.setSpacing(blueprint.h_spacing)
@@ -64,12 +64,13 @@ class RowFactory:
 
         # Col 1: name
         name_lbl = QLabel(row["name"])
+        name_lbl.setTextFormat(Qt.PlainText)
         grp_name_font = QFont(blueprint.font_family, blueprint.size["label"])
         grp_name_font.setBold(has_running)
         name_lbl.setFont(grp_name_font)
         name_lbl.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
         name_lbl.setFixedWidth(blueprint.min_name_w)
-        fg = blueprint.theme["group_running_text"] if has_running else blueprint.theme["group_header_text"]
+        fg = blueprint.theme["group_running_fg"] if has_running else blueprint.theme["group_fg"]
         name_lbl.setStyleSheet(f"color: {fg};")
         row_container_layout.addWidget(name_lbl)
 
@@ -77,7 +78,7 @@ class RowFactory:
         count_lbl = QLabel(f"({len(children)})")
         count_lbl.setFont(blueprint.action_font)
         count_lbl.setAlignment(Qt.AlignCenter)
-        count_lbl.setStyleSheet(f"color: {blueprint.theme["group_header_text"]};")
+        count_lbl.setStyleSheet(f"color: {blueprint.theme['group_fg']};")
         if not show_count:
             count_lbl.setVisible(False)
         row_container_layout.addWidget(count_lbl)
@@ -130,29 +131,45 @@ class RowFactory:
                         on_start: Callable[...,Any],
                         on_stop: Callable[...,Any],
                         on_adjust: Callable[...,Any],
-                        on_remove: Callable[...,Any]):
+                        on_remove: Callable[...,Any],
+                        force_line_gap: bool = False,
+                        footer_line: bool = False):
         _ALIGN = {"Left": Qt.AlignLeft | Qt.AlignVCenter,
                   "Center": Qt.AlignCenter,
                   "Right": Qt.AlignRight | Qt.AlignVCenter}
 
         # Calculate the foreground based on if the timer is running or not.
-        fg = blueprint.theme["running_text"] if state.running else blueprint.theme["text"]
+        fg = blueprint.theme["row_running_fg"] if state.running else blueprint.theme["app_fg"]
 
         # Calculate what the row_bg should be based on if its being dragged and/or if there's a user-set background color
         if is_dragging:
-            row_bg = blueprint.theme["row_dragged"]
+            row_bg = blueprint.theme["row_drag_bg"]
         else:
-            row_bg = row.get("bg") or blueprint.theme["bg"]
+            row_bg = row.get("bg") or blueprint.theme["app_bg"]
 
         margin_css = (f"margin-left: {blueprint.indent_px - 3}px;" if is_child else "")
         rc = QWidget()
         rc.setObjectName("rowBg")
-        border_css = (f"border-bottom: 1px solid {blueprint.theme['row_separator']};"
-                      if draw_separator_line else "")
+        # footer_line: this is the bottom-most row — its client separator is
+        # replaced by the thick footer separator so the two don't stack.
+        if footer_line:
+            border_css = f"border-bottom: 2px solid {blueprint.theme['chrome_line']};"
+        elif draw_separator_line:
+            border_css = f"border-bottom: 1px solid {blueprint.theme['row_line']};"
+        else:
+            border_css = ""
         rc.setStyleSheet(
             f"#rowBg {{ background-color: {row_bg}; {margin_css} {border_css} }}")
         rc_lay = QHBoxLayout(rc)
-        rc_lay.setContentsMargins(0, 0, 0, 0)
+        # Bottom margin only when a separator line is drawn there — the
+        # stylesheet border paints inside the row's rect, so without this the
+        # buttons sit directly on the line. Gap is per-size ("line_gap").
+        # force_line_gap applies it regardless (used in rearrange mode so all
+        # rows share one height and dragging never resizes anything).
+        rc_lay.setContentsMargins(
+            0, 0, 0,
+            blueprint.size.get("line_gap", 0)
+            if (draw_separator_line or footer_line or force_line_gap) else 0)
         rc_lay.setSpacing(blueprint.h_spacing)
 
         # Col 0: bullet
@@ -165,6 +182,7 @@ class RowFactory:
 
         # Col 1: name
         name_lbl = QLabel(row["name"])
+        name_lbl.setTextFormat(Qt.PlainText)
         name_lbl.setFont(QFont(blueprint.font_family, blueprint.size["label"]))
         name_lbl.setAlignment(_ALIGN.get(label_align, Qt.AlignCenter))
         name_lbl.setFixedWidth(blueprint.min_name_w)

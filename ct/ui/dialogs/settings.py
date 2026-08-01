@@ -5,7 +5,7 @@ import re
 from datetime import datetime
 from pathlib import Path
 from PySide6.QtCore import Qt, QTime, QUrl
-from PySide6.QtGui import QColor, QDesktopServices, QFont, QFontMetrics
+from PySide6.QtGui import QDesktopServices, QFont, QFontMetrics
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QAbstractSpinBox,
@@ -62,22 +62,26 @@ class ConfigDialog(QDialog):
         self.setModal(True)
 
         # Output attributes — read by MainWindow after dialog closes
-        self.chosen_theme = cfg.get("theme", "Cupertino Light")
+        self.chosen_theme = cfg.get("theme", "E-Ink (Default)")
         self.chosen_size = cfg.get("size", "Regular")
         self.chosen_font = cfg.get("font", "Calibri")
         self.chosen_label_align = cfg.get("label_align", "Left")
-        self.chosen_client_separators = cfg.get("client_separators", False)
+        self.chosen_client_separators = cfg.get("client_separators", True)
         self.chosen_show_group_count = cfg.get("show_group_count", True)
         self.chosen_show_group_time = cfg.get("show_group_time", True)
         self.chosen_always_on_top = cfg.get("always_on_top", True)
         self.chosen_snapshot_min_minutes = cfg.get("snapshot_min_minutes", 5)
         self.chosen_confirm_delete = cfg.get("confirm_delete", True)
         self.chosen_confirm_reset = cfg.get("confirm_reset", True)
-        self.chosen_daily_reset_enabled = cfg.get("daily_reset_enabled", False)
-        self.chosen_daily_reset_time = cfg.get("daily_reset_time", "00:00")
+        self.chosen_daily_reset_enabled = cfg.get("daily_reset_enabled", True)
+        self.chosen_daily_reset_time = cfg.get("daily_reset_time", "03:00")
         self.chosen_button_visibility = cfg.get("button_visibility", "All")
+        self.chosen_recover_running_time = cfg.get("recover_running_time", True)
         self.restore_path = None
         self.style_changed = False
+
+        # Kept for comparison in _apply — no changes means no rebuild.
+        self._initial_cfg = dict(cfg)
 
         # --- Layout ---
         outer = QHBoxLayout(self)
@@ -106,13 +110,8 @@ class ConfigDialog(QDialog):
 
         left_col.addLayout(pages, 1)
 
-        # Bottom row: restart indicator + Apply
+        # Bottom row: Apply
         btn_row = QHBoxLayout()
-        self._restart_lbl = QLabel("* Restart required")
-        self._restart_lbl.setFont(QFont("Calibri", 10))
-        self._restart_lbl.setStyleSheet("color: #888888;")
-        self._restart_lbl.setVisible(False)
-        btn_row.addWidget(self._restart_lbl)
         btn_row.addStretch()
         apply_btn = QPushButton("Apply")
         apply_btn.setFont(QFont("Calibri", 12))
@@ -133,8 +132,31 @@ class ConfigDialog(QDialog):
         # Track which table is active so we can deselect the other
         self._active_table = None
 
-        # Track initial values for restart detection
-        self._initial_always_on_top = cfg.get("always_on_top", True)
+        self._positioned = False
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        # Position beside the main window instead of covering it, so the
+        # timers stay visible while tweaking settings.
+        if self._positioned:
+            return
+        self._positioned = True
+        parent = self.parentWidget()
+        if parent is None:
+            return
+        gap    = 12
+        pgeo   = parent.frameGeometry()
+        screen = parent.screen().availableGeometry()
+        fgeo   = self.frameGeometry()
+        w, h   = fgeo.width(), fgeo.height()
+        x = pgeo.right() + gap                    # prefer the right side
+        if x + w > screen.right():
+            x = pgeo.left() - gap - w             # fall back to the left
+        if x < screen.left():                     # no room either side —
+            x = max(screen.left(),                # keep it on-screen
+                    min(pgeo.right() + gap, screen.right() - w))
+        y = max(screen.top(), min(pgeo.top(), screen.bottom() - h))
+        self.move(x, y)
 
     def _on_tab_changed(self, index):
         self._stack.setCurrentIndex(index)
@@ -155,19 +177,14 @@ class ConfigDialog(QDialog):
         if hasattr(self, '_restore_btn'):
             self._restore_btn.setEnabled(False)
 
-    def _check_restart_needed(self):
-        current_aot = self._always_on_top.currentText() == "Always On Top"
-        self._restart_lbl.setVisible(
-            current_aot != self._initial_always_on_top)
-
     def _on_daily_reset_toggle(self):
         enabled = self._daily_reset.currentText() == "On"
         # Enable/disable child controls
         for widget in self._dr_child_widgets:
             widget.setEnabled(enabled)
         # Gray out/restore child labels
-        t = THEMES.get(self.chosen_theme, THEMES["Cupertino Light"])
-        color = t["text"] if enabled else t.get("text_grayed_out", "#888888")
+        t = THEMES.get(self.chosen_theme, THEMES["E-Ink (Default)"])
+        color = t["app_fg"] if enabled else t["app_fg_muted"]
         for lbl in self._dr_child_labels:
             lbl.setStyleSheet(f"color: {color};")
 
@@ -194,8 +211,6 @@ class ConfigDialog(QDialog):
         )
         self._always_on_top.setMinimumWidth(200)
         self._always_on_top.setToolTip(window_behavior_tooltip)
-        self._always_on_top.currentTextChanged.connect(
-            self._check_restart_needed)
         row.addWidget(lbl)
         row.addWidget(self._always_on_top)
         lay.addLayout(row)
@@ -460,11 +475,11 @@ class ConfigDialog(QDialog):
 
         # Resolve theme for colors
         theme_name = self.chosen_theme
-        t = THEMES.get(theme_name, THEMES["Cupertino Light"])
+        t = THEMES.get(theme_name, THEMES["E-Ink (Default)"])
 
         # Build the preview widget
         content = QWidget()
-        content.setStyleSheet(f"background-color: {t['bg']};")
+        content.setStyleSheet(f"background-color: {t['app_bg']};")
         lay = QVBoxLayout(content)
         lay.setSpacing(2)
         lay.setContentsMargins(6, 6, 6, 6)
@@ -475,7 +490,7 @@ class ConfigDialog(QDialog):
             title_lbl.setFont(QFont("Calibri", 10, QFont.Bold))
             title_lbl.setAlignment(Qt.AlignCenter)
             title_lbl.setStyleSheet(
-                f"color: {t['text']}; background: transparent;")
+                f"color: {t['app_fg']}; background: transparent;")
             title_lbl.setWordWrap(True)
             lay.addWidget(title_lbl)
             sep = QFrame()
@@ -499,19 +514,7 @@ class ConfigDialog(QDialog):
 
             if rtype == "separator":
                 current_sep_rid = rid
-                # Calculate total time for children
-                children = []
-                total = 0
-                for r2 in rows:
-                    if r2 is row:
-                        continue
-                    if r2.get("type") == "separator":
-                        if children:
-                            break
-                        continue
-                    if current_sep_rid == rid:
-                        children.append(r2)
-                # Recalculate properly — gather children that follow this separator
+                # Gather children that follow this separator and sum their time
                 children = []
                 found = False
                 for r2 in rows:
@@ -529,7 +532,7 @@ class ConfigDialog(QDialog):
 
                 sep_w = QWidget()
                 sep_w.setObjectName(f"pvSep{rid}")
-                ghbg = row.get("bg") or t.get("group_header_bg", t["bg"])
+                ghbg = row.get("bg") or t["group_bg"]
                 sep_w.setStyleSheet(
                     f"#pvSep{rid} {{ background-color: {ghbg}; }}")
                 sep_lay = QHBoxLayout(sep_w)
@@ -539,13 +542,13 @@ class ConfigDialog(QDialog):
                 toggle = QPushButton("\u25BE")
                 toggle.setFixedSize(18, 18)
                 toggle.setStyleSheet("padding: 0; border: none; background: transparent;"
-                                     f" color: {t.get('group_header_text', t['text'])};")
+                                     f" color: {t['group_fg']};")
                 sep_lay.addWidget(toggle)
 
                 name_lbl = QLabel(name)
                 name_lbl.setFont(label_font_bold)
                 name_lbl.setStyleSheet(
-                    f"color: {t.get('group_header_text', t['text'])};"
+                    f"color: {t['group_fg']};"
                     " background: transparent;")
                 sep_lay.addWidget(name_lbl, 1)
 
@@ -553,7 +556,7 @@ class ConfigDialog(QDialog):
                 time_lbl.setFont(time_font)
                 time_lbl.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
                 time_lbl.setStyleSheet(
-                    f"color: {t.get('group_header_text', t['text'])};"
+                    f"color: {t['group_fg']};"
                     " background: transparent;")
                 sep_lay.addWidget(time_lbl)
 
@@ -568,7 +571,7 @@ class ConfigDialog(QDialog):
 
                 timer_w = QWidget()
                 timer_w.setObjectName(f"pvTmr{rid}")
-                rbg = row.get("bg") or t["bg"]
+                rbg = row.get("bg") or t["app_bg"]
                 margin = "margin-left: 12px;" if is_child else ""
                 timer_w.setStyleSheet(
                     f"#pvTmr{rid} {{ background-color: {rbg}; {margin} }}")
@@ -579,14 +582,14 @@ class ConfigDialog(QDialog):
                 name_lbl = QLabel(name)
                 name_lbl.setFont(label_font)
                 name_lbl.setStyleSheet(
-                    f"color: {t['text']}; background: transparent;")
+                    f"color: {t['app_fg']}; background: transparent;")
                 tmr_lay.addWidget(name_lbl, 1)
 
                 time_lbl = QLabel(format_time(int(elapsed)))
                 time_lbl.setFont(time_font)
                 time_lbl.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
                 time_lbl.setStyleSheet(
-                    f"color: {t['text']}; background: transparent;")
+                    f"color: {t['app_fg']}; background: transparent;")
                 tmr_lay.addWidget(time_lbl)
 
                 lay.addWidget(timer_w)
@@ -682,7 +685,7 @@ class ConfigDialog(QDialog):
         self._daily_reset = QComboBox()
         self._daily_reset.addItems(["Off", "On"])
         self._daily_reset.setCurrentText(
-            "On" if cfg.get("daily_reset_enabled", False) else "Off")
+            "On" if cfg.get("daily_reset_enabled", True) else "Off")
         self._daily_reset.setMinimumWidth(200)
         self._daily_reset.setToolTip(daily_reset_tooltip)
         self._daily_reset.currentTextChanged.connect(
@@ -706,7 +709,7 @@ class ConfigDialog(QDialog):
         self._daily_reset_time = QTimeEdit()
         self._daily_reset_time.setButtonSymbols(QAbstractSpinBox.NoButtons)
         try:
-            h, m = map(int, cfg.get("daily_reset_time", "00:00").split(":"))
+            h, m = map(int, cfg.get("daily_reset_time", "03:00").split(":"))
         except ValueError:
             h, m = 0, 0
         self._daily_reset_time.setTime(QTime(h, m))
@@ -798,16 +801,8 @@ class ConfigDialog(QDialog):
         lbl.setFont(QFont("Calibri", 12, QFont.Bold))
         lbl.setToolTip(appearance_theme_tooltip)
         self._theme = QComboBox()
-        _base = ["Cupertino Light", "Galaxy Dark"]
-        _extra = [t for t in THEMES if t not in _base]
-        self._theme.addItems(_base)
-        self._theme.addItem("\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500")
-        self._theme_sep_idx = len(_base)
-        model = self._theme.model()
-        item = model.item(self._theme_sep_idx)
-        item.setEnabled(False)
-        self._theme.addItems(_extra)
-        self._theme.setCurrentText(cfg.get("theme", "Cupertino Light"))
+        self._theme.addItems(THEMES)
+        self._theme.setCurrentText(cfg.get("theme", "E-Ink (Default)"))
         self._theme.setMinimumWidth(230)
         self._theme.setToolTip(appearance_theme_tooltip)
         self._theme.currentTextChanged.connect(self._refresh_preview)
@@ -860,7 +855,7 @@ class ConfigDialog(QDialog):
         self._sep = QComboBox()
         self._sep.addItems(["No", "Yes"])
         self._sep.setCurrentText(
-            "Yes" if cfg.get("client_separators", False) else "No")
+            "Yes" if cfg.get("client_separators", True) else "No")
         self._sep.setMinimumWidth(230)
         self._sep.setToolTip(appearance_client_separators_tooltip)
         self._sep.currentTextChanged.connect(self._refresh_preview)
@@ -951,7 +946,7 @@ class ConfigDialog(QDialog):
         self._p_t1_row = QWidget()
         self._p_t1_row.setObjectName("pT1Row")
         t1_lay = QHBoxLayout(self._p_t1_row)
-        t1_lay.setContentsMargins(0, 0, 0, 0)
+        t1_lay.setContentsMargins(0, 0, 0, 0)  # bottom set in _refresh_preview
         t1_lay.setSpacing(6)
         self._p1_bullet = QLabel("\u2022")
         self._p1_bullet.setAlignment(Qt.AlignCenter)
@@ -1009,37 +1004,34 @@ class ConfigDialog(QDialog):
         t = THEMES[theme_name]
         s = SIZES[self._size.currentText()]
         font_family = self._font.currentData()
-        ghbg = t.get("group_header_bg", t["bg"])
+        ghbg = t["group_bg"]
 
-        normal_fg = t["text"]
-        running_fg = t.get("running_text", normal_fg)
-        ghfg = t.get("group_header_text", normal_fg)
-        ghfg_running = t.get("group_running_text", ghfg)
-
-        # Style the theme dropdown separator item
-        model = self._theme.model()
-        sep_item = model.item(self._theme_sep_idx)
-        sep_item.setForeground(QColor(t.get("separator", "#888888")))
+        normal_fg = t["app_fg"]
+        running_fg = t["row_running_fg"]
+        ghfg = t["group_fg"]
+        ghfg_running = t["group_running_fg"]
 
         # Outer preview frame
         self._preview.setStyleSheet(
-            f"#preview {{ background-color: {t['bg']};"
+            f"#preview {{ background-color: {t['app_bg']};"
             f"  border: 2px solid gray; }}"
         )
 
         # Row backgrounds (with optional client separator line)
         sep_on = self._sep.currentText() == "Yes"
-        sep_css = (f"border-bottom: 1px solid {t['row_separator']};"
+        sep_css = (f"border-bottom: 1px solid {t['row_line']};"
                    if sep_on else "")
-        group_border = t.get("group_border", ghbg)
+        self._p_t1_row.layout().setContentsMargins(
+            0, 0, 0, s.get("line_gap", 0) if sep_on else 0)
+        group_line = t["group_line"]
         self._p_grp_row.setStyleSheet(
             f"#pGrpRow {{ background-color: {ghbg};"
-            f"  border: 2px solid {group_border}; }}")
+            f"  border: 2px solid {group_line}; }}")
         self._p_t1_row.setStyleSheet(
-            f"#pT1Row {{ background-color: {t['bg']};"
+            f"#pT1Row {{ background-color: {t['app_bg']};"
             f"  margin-left: 12px; {sep_css} }}")
         self._p_t2_row.setStyleSheet(
-            f"#pT2Row {{ background-color: {t['bg']};"
+            f"#pT2Row {{ background-color: {t['app_bg']};"
             f"  margin-left: 12px; }}")
 
         # Group header label colours (preview shows running children)
@@ -1049,27 +1041,31 @@ class ConfigDialog(QDialog):
             lbl.setStyleSheet(grp_lbl_running)
 
         # Timer label colours
-        tmr_lbl = f"color: {t['text']}; background: transparent;"
+        tmr_lbl = f"color: {t['app_fg']}; background: transparent;"
         for lbl in (self._p1_bullet, self._p1_name, self._p1_time,
                     self._p2_bullet, self._p2_name, self._p2_time):
             lbl.setStyleSheet(tmr_lbl)
 
         # Button styling
+        act_fg = t["control_hover_fg"]
+        line_c = t["control_line"]
         btn_style = (
-            f"QPushButton {{ color: {t['button_text']};"
-            f"  background-color: {t['button_bg']};"
-            f"  border: {t['border']}px solid rgba(128,128,128,0.4);"
+            f"QPushButton {{ color: {t['control_fg']};"
+            f"  background-color: {t['control_bg']};"
+            f"  border: {t['control_border_px']}px solid {line_c};"
             f"  padding: 4px 8px; }}"
             f"QPushButton:hover, QPushButton:pressed {{"
-            f"  background-color: {t['button_active']}; }}"
+            f"  color: {act_fg};"
+            f"  background-color: {t['control_hover_bg']}; }}"
         )
         btn_sq = (
-            f"QPushButton {{ color: {t['button_text']};"
-            f"  background-color: {t['button_bg']};"
-            f"  border: {t['border']}px solid rgba(128,128,128,0.4);"
+            f"QPushButton {{ color: {t['control_fg']};"
+            f"  background-color: {t['control_bg']};"
+            f"  border: {t['control_border_px']}px solid {line_c};"
             f"  padding: 0px; }}"
             f"QPushButton:hover, QPushButton:pressed {{"
-            f"  background-color: {t['button_active']}; }}"
+            f"  color: {act_fg};"
+            f"  background-color: {t['control_hover_bg']}; }}"
         )
         for btn in (self._p1_start, self._p1_stop, self._p1_minus,
                     self._p1_plus, self._p2_start, self._p2_stop,
@@ -1194,5 +1190,25 @@ class ConfigDialog(QDialog):
         self.chosen_show_group_time = (
             self._grp_time.currentText() == "Yes")
         self.chosen_button_visibility = self._btn_vis.currentText()
-        self.style_changed = True
+        # Only flag a change if something actually differs from the values
+        # the dialog opened with — otherwise Apply is a no-op for the caller.
+        chosen = {
+            "theme":                self.chosen_theme,
+            "size":                 self.chosen_size,
+            "font":                 self.chosen_font,
+            "label_align":          self.chosen_label_align,
+            "client_separators":    self.chosen_client_separators,
+            "show_group_count":     self.chosen_show_group_count,
+            "show_group_time":      self.chosen_show_group_time,
+            "always_on_top":        self.chosen_always_on_top,
+            "confirm_delete":       self.chosen_confirm_delete,
+            "confirm_reset":        self.chosen_confirm_reset,
+            "daily_reset_enabled":  self.chosen_daily_reset_enabled,
+            "daily_reset_time":     self.chosen_daily_reset_time,
+            "snapshot_min_minutes": self.chosen_snapshot_min_minutes,
+            "button_visibility":    self.chosen_button_visibility,
+            "recover_running_time": self.chosen_recover_running_time,
+        }
+        self.style_changed = any(
+            self._initial_cfg.get(k) != v for k, v in chosen.items())
         self.accept()

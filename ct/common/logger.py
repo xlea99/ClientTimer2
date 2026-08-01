@@ -19,7 +19,9 @@ def get_logger(
 ) -> logging.Logger:
     logger = logging.getLogger(name)
     logger.propagate = False
-    logger.setLevel(level)
+    # The logger itself must pass DEBUG records whenever a historical debug
+    # handler is attached — the per-handler levels do the actual filtering.
+    logger.setLevel(logging.DEBUG if historical_debugs > 0 else level)
 
     log_dir = log_dir or PATHS.logs
     log_dir.mkdir(parents=True,exist_ok=True)
@@ -91,5 +93,5 @@ def get_logger(
 
     return logger
 
-log = get_logger(level=logging.DEBUG,console=False,historical_debugs=10)
+log = get_logger(level=logging.INFO,console=False,historical_debugs=10)
 log.info("=== INITIALIZED NEW SESSION ===")

@@ -39,7 +39,7 @@ class TimerState:
     def stop(self):
         if self.running:
             now = time.monotonic()
-            self.elapsed += time.monotonic() - self._mono
+            self.elapsed += now - self._mono
             self.running = False
             self._mono = None
             self.started_at = None
@@ -58,9 +58,9 @@ class TimerState:
             now = time.monotonic()
             self.elapsed += now - self._mono
             self._mono = now
-    # Manually sets the timer to the given time.
+    # Manually adjusts the timer's time by the given delta in seconds (clamped at zero).
     def adjust(self, seconds):
         self.freeze()
         self.elapsed = max(0.0, self.elapsed + seconds)
-        log.debug(f"Manually set timer '{self.name}' time to {seconds} seconds")
+        log.debug(f"Adjusted timer '{self.name}' by {seconds} seconds to {self.elapsed}")
 

@@ -68,7 +68,7 @@ class ProjectPaths:
         data = ensure_directory(Path(appdata) / "ClientTimer2")
 
         # The path to the Old ClientTimer1 folder may or may not exist, so we don't enforce it.
-        old = Path(Path(appdata) / "Client Timer 1")
+        old = Path(appdata) / "Client Timer 1"
 
         # Folders within the data folder
         logs = ensure_directory(data / "logs")
