@@ -126,6 +126,7 @@ class AppState:
             "layout": {
                 "rows": [],
                 "collapsed_groups": [],
+                "window_height": 0,
             },
             "settings": dict(_SETTINGS_DEFAULTS),
             "session": {
@@ -142,6 +143,7 @@ class AppState:
         self.collapsed_groups = collapsed_groups  # live set — mutated in place by MainWindow
         self.session_start    = session_start
         self.tracked_times    = tracked_times     # used only during MainWindow.__init__
+        self.window_height    = 0                 # user's height ceiling; 0 = auto-fit
         self.migrated_from_ct1 = None             # set by load() if CT1 migration occurred
         self.theme_renamed = False                # set by load() if a retired theme was migrated
 
@@ -166,6 +168,7 @@ class AppState:
             "layout": {
                 "rows":             list(self.rows),
                 "collapsed_groups": list(self.collapsed_groups),
+                "window_height":    int(self.window_height),
             },
             "settings": self.settings.to_dict(),
             "session": {
@@ -229,7 +232,8 @@ class AppState:
 
                 # Validate the layout dict, default to empty if its missing and treat as an error
                 if not isinstance(state.get("layout"), dict):
-                    state["layout"] = {"rows": [], "collapsed_groups": []}
+                    state["layout"] = {"rows": [], "collapsed_groups": [],
+                                       "window_height": 0}
                     defaulted_values.add("layout")
                 # Validate rows and collapsed groups in layout dict.
                 else:
@@ -239,6 +243,12 @@ class AppState:
                     if not isinstance(state["layout"].get("collapsed_groups"), list):
                         state["layout"]["collapsed_groups"] = []
                         defaulted_values.add("layout.collapsed_groups")
+                    # Absent on states written before window sizing existed.
+                    wh = state["layout"].get("window_height", 0)
+                    if not isinstance(wh, int) or isinstance(wh, bool) or wh < 0:
+                        state["layout"]["window_height"] = 0
+                        if "window_height" in state["layout"]:
+                            defaulted_values.add("layout.window_height")
 
                 # Validate the settings dict, fill in any necessary defaults
                 if not isinstance(state.get("settings"), dict):
@@ -298,6 +308,7 @@ class AppState:
             start = datetime.now().astimezone()
         tracked = state["session"]["tracked_times"]
         obj = cls(settings, rows, collapsed, start, tracked)
+        obj.window_height = state["layout"].get("window_height", 0)
         obj.migrated_from_ct1 = state.get("_migrated_from_ct1")
         obj.theme_renamed = theme_renamed
         return obj

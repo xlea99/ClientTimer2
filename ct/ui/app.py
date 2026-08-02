@@ -1,4 +1,5 @@
 import ctypes
+from ctypes import wintypes
 import re
 import time
 import sys
@@ -10,6 +11,7 @@ from PySide6.QtWidgets import (
     QApplication,
     QColorDialog,
     QDialog,
+    QFrame,
     QGraphicsOpacityEffect,
     QInputDialog,
     QLabel,
@@ -17,6 +19,7 @@ from PySide6.QtWidgets import (
     QMenu,
     QMessageBox,
     QPushButton,
+    QScrollArea,
     QVBoxLayout,
     QWidget,
 )
@@ -36,6 +39,13 @@ from ct.util import format_time
 # Only control characters are stripped — name labels render as PlainText so
 # nothing else needs escaping.
 _SANITIZE = re.compile(r"[\x00-\x1f\x7f-\x9f]+")
+
+# Windows sends these around an interactive move/resize of the window frame.
+# They bracket the whole gesture, so they tell us when the user has actually
+# let go — resize events alone can't, since holding the edge still looks
+# identical to having stopped.
+_WM_ENTERSIZEMOVE = 0x0231
+_WM_EXITSIZEMOVE  = 0x0232
 
 
 
@@ -97,6 +107,15 @@ class MainWindow(QMainWindow):
         self._main_lay.setContentsMargins(0, 0, 0, 0)
 
         self._time_labels    = {}    # time QLabel -> rowid, for click-to-copy
+        self._scroll_area    = None  # the row viewport, rebuilt with the grid
+        self._expected_size  = None  # last size we asked for ourselves
+        self._programmatic_resize = False
+        self._user_resizing  = False  # true between ENTER/EXITSIZEMOVE
+        self._ready_for_user_resize = False  # set once show() has settled
+        self._resize_settle  = QTimer(self)
+        self._resize_settle.setSingleShot(True)
+        self._resize_settle.setInterval(200)
+        self._resize_settle.timeout.connect(self._on_resize_settled)
         self._grid_widget    = None  # created fresh each _rebuild_rows
         self._content_widget = None  # single swappable child: grid + footer
 
@@ -131,7 +150,7 @@ class MainWindow(QMainWindow):
 
         self._apply_style()
         self._rebuild_rows()
-        self.adjustSize()
+        self._shrink_to_fit()
 
         # -- Show any pending toast from startup checks --
         if self._pending_toast:
@@ -356,11 +375,35 @@ class MainWindow(QMainWindow):
         # separate children of the top-level layout now, and swapping them can
         # flush a partially-built frame to screen (a one-frame flicker on
         # drag-drop). Batch everything into a single repaint.
+        # A rebuild throws away the scroll viewport and builds a new one, so
+        # the position has to be carried across by hand. Done here rather than
+        # at the call sites because _reorder_visual rebuilds mid-drag, and
+        # that path would otherwise yank the list back to the top.
+        keep = 0
+        if self._scroll_area is not None:
+            keep = self._scroll_area.verticalScrollBar().value()
         self.setUpdatesEnabled(False)
         try:
             self._rebuild_rows_impl()
+            if keep:
+                self._restore_scroll(keep)
         finally:
             self.setUpdatesEnabled(True)
+
+    def _restore_scroll(self, value):
+        """Put the viewport back where it was before the rebuild."""
+        if self._scroll_area is None:
+            return
+        bar = self._scroll_area.verticalScrollBar()
+        bar.setValue(value)
+        if bar.value() != value:
+            # The fresh content hasn't been measured yet, so the scrollbar's
+            # range is still stale and clamped us. Try again once it has.
+            QTimer.singleShot(0, lambda v=value: self._reapply_scroll(v))
+
+    def _reapply_scroll(self, value):
+        if self._scroll_area is not None:
+            self._scroll_area.verticalScrollBar().setValue(value)
 
     def _rebuild_rows_impl(self):
         """Tear down and recreate the entire grid: client rows + footer."""
@@ -380,7 +423,8 @@ class MainWindow(QMainWindow):
         self._grid_widget = QWidget()
         self._grid = QVBoxLayout(self._grid_widget)
         self._grid.setContentsMargins(0, 0, 0, 0)
-        content_lay.addWidget(self._grid_widget)
+        # NOTE: the grid is added to content_lay further down — bare when the
+        # row count is under the cap, wrapped in a QScrollArea when it isn't.
 
         ss = self._state.settings
         t  = THEMES.get(ss.theme, THEMES["E-Ink (Default)"])
@@ -390,7 +434,7 @@ class MainWindow(QMainWindow):
 
         blueprint = UIBlueprint.compute(t, s, ss.font, self._state.rows, self._has_mdl2)
 
-        bottom_merged = False  # last row hosts the footer line itself
+        row_containers = []    # every row widget, for the uniform-height pass
 
         if not self._state.rows:
             lbl = QLabel("No clients. Add one to begin!")
@@ -454,11 +498,6 @@ class MainWindow(QMainWindow):
                                  and visible_entries[idx + 1][0]["type"] == "timer")
                     # Bottom-most row: replace its client separator with the
                     # thick footer line instead of stacking both.
-                    is_footer_row = (ss.client_separators
-                                     and idx == len(visible_entries) - 1)
-                    if is_footer_row:
-                        bottom_merged = True
-
                     timer_state = self.timers[rid]
                     row_container, widget_dict = RowFactory.timer(
                         blueprint=blueprint, rid=rid, row=row, state=timer_state,
@@ -467,9 +506,14 @@ class MainWindow(QMainWindow):
                         is_child=is_child,
                         is_dragging=self._drag.dragging_rid == rid,
                         draw_separator_line=needs_sep,
-                        footer_line=is_footer_row,
-                        force_line_gap=(self._rearranging
-                                        and ss.client_separators),
+                        # The thick rule sits below the scroll viewport now,
+                        # so no row ever carries it.
+                        footer_line=False,
+                        # Every timer row reserves the separator gap, whether
+                        # or not it draws a line. Without this, rows that
+                        # don't draw one are shorter and their contents sit
+                        # at a different height from their neighbours'.
+                        force_line_gap=ss.client_separators,
                         on_start=self._on_start,
                         on_stop=self._on_stop,
                         on_adjust=self._on_adjust,
@@ -506,15 +550,52 @@ class MainWindow(QMainWindow):
                         tlbl.setCursor(Qt.PointingHandCursor)
                         self._time_labels[tlbl] = rid
 
+                row_containers.append(row_container)
                 self._grid.addWidget(row_container)
 
-        # Footer separator — standalone only when the bottom row doesn't
-        # already carry it (separators off, or last visible row is a group).
-        if self._state.rows and not bottom_merged:
+        # Every row gets the same height — the tallest one's. Group headers
+        # and timer rows naturally differ by a few pixels, and that made any
+        # given window of N rows a different total height from the next,
+        # so the bottom row was clipped by a varying amount while scrolling.
+        # One pitch means both edges stay flush at every scroll position.
+        if row_containers:
+            uniform = max(c.sizeHint().height() for c in row_containers)
+            for c in row_containers:
+                c.setFixedHeight(uniform)
+
+        # The grid always lives in a scroll viewport. Without one the layout's
+        # minimum size is the whole row list, so the user physically cannot
+        # drag the window shorter than its contents.
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        scroll.setWidget(self._grid_widget)
+        # Breathing room between the rows and the scrollbar. Applied as a
+        # margin on the bar itself so it only takes space when the bar is
+        # actually rendered.
+        sb_gap = s.get("scrollbar_gap", 0)
+        if sb_gap:
+            scroll.verticalScrollBar().setStyleSheet(
+                f"QScrollBar:vertical {{ margin-left: {sb_gap}px; }}")
+        # Wheel scrolling moves whole rows — see eventFilter.
+        scroll.viewport().installEventFilter(self)
+        content_lay.addWidget(scroll)
+        self._scroll_area = scroll
+
+        # Footer separator — below the viewport so it stays put while the
+        # rows scroll under it.
+        if self._state.rows:
+            # Gap above the rule, independent of "footer_gap" (which is the
+            # gap below it, before the buttons).
+            line_gap_above = s.get("footer_line_gap", 0)
+            if line_gap_above:
+                content_lay.addSpacing(line_gap_above)
             sep = QWidget()
             sep.setFixedHeight(2)
             sep.setStyleSheet(f"background-color: {t['chrome_line']};")
-            self._grid.addWidget(sep)
+            content_lay.addWidget(sep)
 
         # Footer
         footer, fw = RowFactory.footer(
@@ -596,6 +677,16 @@ class MainWindow(QMainWindow):
     def eventFilter(self, obj, event):
         if self._drag.active:
             return self._drag.handle_event(obj, event)
+
+        # Wheel over the row viewport: advance by whole rows, not pixels.
+        if (event.type() == QEvent.Wheel and self._scroll_area is not None
+                and obj is self._scroll_area.viewport()):
+            delta = event.angleDelta().y()
+            if delta:
+                notches = -delta / 120.0
+                rows = int(notches) or (1 if notches > 0 else -1)
+                self._scroll_by_rows(rows)
+            return True
 
         # The time label is its own hover/click target inside the row.
         time_rid = self._time_labels.get(obj)
@@ -688,7 +779,7 @@ class MainWindow(QMainWindow):
         self._save_state()
         self._try_snapshot(reason="layout_change", priority="medium")
         self._rebuild_rows()
-        self.adjustSize()
+        self._shrink_to_fit()
 
     def _on_group_toggle(self, rowid):
         if rowid in self._state.collapsed_groups:
@@ -729,14 +820,14 @@ class MainWindow(QMainWindow):
             self._save_state()
             self._try_snapshot(reason="layout_change", priority="medium")
             self._rebuild_rows()
-            self.adjustSize()
+            self._shrink_to_fit()
 
     def _on_rearrange_toggle(self):
         self._rearranging = not self._rearranging
         self._rebuild_rows()
         # Rearrange mode gives every row a uniform line_gap so drags never
         # resize anything — absorb that height change here, at the toggle.
-        self.adjustSize()
+        self._shrink_to_fit()
 
     # ------------------------------------------------------------------ #
     #  Hover and context menu                                              #
@@ -866,7 +957,7 @@ class MainWindow(QMainWindow):
             self._save_state()
             self._try_snapshot(reason="layout_change", priority="medium")
             self._rebuild_rows()
-            self.adjustSize()
+            self._shrink_to_fit()
 
     @staticmethod
     def _parse_time_input(text):
@@ -928,7 +1019,7 @@ class MainWindow(QMainWindow):
 
         self._apply_style()
         self._rebuild_rows()
-        self.adjustSize()
+        self._shrink_to_fit()
 
         if self._state.settings.always_on_top != old_aot:
             if sys.platform == "win32":
@@ -962,7 +1053,7 @@ class MainWindow(QMainWindow):
         self._state.save(self.timers)
         self._apply_style()
         self._rebuild_rows()
-        self.adjustSize()
+        self._shrink_to_fit()
         # Parse backup filename: state_YYYYMMDD_HHMMSS_nonce
         m = re.search(r"(\d{4})(\d{2})(\d{2})_(\d{2})(\d{2})(\d{2})", path.stem)
         if m:
@@ -1080,24 +1171,218 @@ class MainWindow(QMainWindow):
         for rid in self.timers:
             self._update_display(rid)
 
+    def _auto_resize(self, width, height):
+        """Resize the window ourselves, clamped to the user's height ceiling.
+
+        Every programmatic resize goes through here so resizeEvent can tell
+        our own resizes apart from the user dragging the window edge.
+        """
+        if self._user_resizing:
+            # Hands off the window while the user is holding its edge.
+            return
+        # No ceiling clamp here: _shrink_to_fit owns that, and it may round
+        # UP to the nearest whole row, which would land just above the
+        # ceiling. Clamping here would undo the rounding.
+        # resize() delivers its event asynchronously and the layout can queue
+        # more of them, so neither a bare flag nor a size match is reliable
+        # alone. Use both: remember the size we asked for, and stay "busy"
+        # until the event loop has drained this turn's resize events.
+        self._programmatic_resize = True
+        self.resize(width, height)
+        self._expected_size = self.size()
+        QTimer.singleShot(0, self._end_programmatic_resize)
+
+    def _end_programmatic_resize(self):
+        self._programmatic_resize = False
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        # Showing the window emits resize events of its own. Without this the
+        # very first one is mistaken for a user drag and pins the ceiling to
+        # whatever height the window happened to open at.
+        self._expected_size = self.size()
+        QTimer.singleShot(0, self._mark_ready_for_user_resize)
+
+    def _mark_ready_for_user_resize(self):
+        self._ready_for_user_resize = True
+
+    def nativeEvent(self, eventType, message):
+        """Bracket interactive resizes so nothing fights the user's mouse."""
+        if eventType == b"windows_generic_MSG":
+            msg = wintypes.MSG.from_address(int(message))
+            if msg.message == _WM_ENTERSIZEMOVE:
+                self._user_resizing = True
+                self._resize_settle.stop()
+            elif msg.message == _WM_EXITSIZEMOVE and self._user_resizing:
+                self._user_resizing = False
+                self._resize_settle.stop()
+                self._on_resize_settled()
+        return super().nativeEvent(eventType, message)
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        # Height only: the width shifts by itself when the scrollbar appears
+        # or disappears, and comparing the full size would read our own
+        # resize as the user's.
+        if (not self._ready_for_user_resize or self._programmatic_resize
+                or self._expected_size is None
+                or event.size().height() == self._expected_size.height()):
+            return
+        # A resize we didn't ask for is the user dragging the edge: that
+        # height becomes the new ceiling. Snapping waits until they stop,
+        # otherwise the window fights the mouse mid-drag.
+        self._state.window_height = event.size().height()
+        # While the frame is being dragged, WM_EXITSIZEMOVE is what ends the
+        # gesture. The timer is only a fallback for platforms without it.
+        if not self._user_resizing:
+            self._resize_settle.start()
+
+    def _on_resize_settled(self):
+        """User finished dragging the edge: snap to whole rows and remember."""
+        self._shrink_to_fit()
+        self._save_state()
+
+    def _row_heights(self):
+        """Heights of the row widgets, measured straight from the widgets.
+
+        Deliberately NOT _grid_widget.sizeHint(): a QLayout caches its hint,
+        and the rows grow slightly once the style has polished them, so the
+        cached value reads short and the window ends up scrolling content
+        that would have fitted.
+        """
+        out = []
+        for i in range(self._grid.count()):
+            w = self._grid.itemAt(i).widget()
+            if w is not None:
+                # Rows carry a fixed height (the uniform-height pass), which
+                # sizeHint() alone doesn't reflect.
+                out.append(max(w.sizeHint().height(), w.minimumHeight()))
+        return out
+
+    def _row_offsets(self):
+        """Scroll positions at which each row sits flush with the viewport top.
+
+        Read from the rows' real positions rather than summing sizeHints: a
+        hint can disagree with the laid-out height (a running row turns bold,
+        a time label's text changes width) and the error would accumulate
+        down the list.
+        """
+        self._grid.activate()
+        offsets = []
+        for i in range(self._grid.count()):
+            w = self._grid.itemAt(i).widget()
+            if w is not None:
+                offsets.append(w.y())
+        return offsets
+
+    def _scroll_by_rows(self, rows):
+        """Scroll by whole rows so the top of the viewport is always flush.
+
+        Stepping by a fixed pixel amount would drift, since group headers and
+        timer rows aren't the same height.
+        """
+        if self._scroll_area is None or not rows:
+            return
+        bar = self._scroll_area.verticalScrollBar()
+        offsets = self._row_offsets()
+        if not offsets:
+            return
+        value = bar.value()
+        # Current top row: the last one at or above the scroll position.
+        idx = 0
+        for i, off in enumerate(offsets):
+            if off <= value + 1:
+                idx = i
+            else:
+                break
+        # The bottom of the list can't always be reached on a row boundary —
+        # the final step clamps to maximum(), leaving a partial row at the
+        # top. From there the first scroll up should re-align to the row we
+        # are inside, not skip past it to the one before.
+        if rows < 0 and abs(offsets[idx] - value) > 1:
+            rows += 1
+        target = max(0, min(len(offsets) - 1, idx + rows))
+        bar.setValue(min(offsets[target], bar.maximum()))
+
+    def _content_height(self):
+        heights = self._row_heights()
+        if not heights:
+            return 0
+        m = self._grid.contentsMargins()
+        return (sum(heights) + self._grid.spacing() * (len(heights) - 1)
+                + m.top() + m.bottom())
+
+    def _snapped_height(self, target_h, chrome):
+        """Largest height <= target_h that shows only whole rows.
+
+        `chrome` (everything that isn't viewport: footer, rule, margins) is
+        passed in rather than measured from live geometry. Deriving it here
+        from self.height() - viewport.height() disagreed with the caller's
+        layout-derived value whenever the geometry was mid-update — which is
+        exactly the case right after a drag, where the window has just been
+        un-fixed and rebuilt.
+
+        The ceiling itself keeps the user's exact number; only the window we
+        draw is trimmed, so repeated rebuilds never creep the value.
+        """
+        avail = target_h - chrome
+        if avail <= 0:
+            return target_h
+        spacing = self._grid.spacing()
+        used = 0
+        for i, h in enumerate(self._row_heights()):
+            step = h + (spacing if i else 0)
+            if used + step > avail:
+                # Round to the NEAREST row rather than always trimming: if
+                # more than half of the next one fits, take the whole thing.
+                if (avail - used) * 2 > step:
+                    used += step
+                break
+            used += step
+        return used + chrome if used > 0 else target_h
+
     def _shrink_to_fit(self):
         """Resize window to tightly fit its contents (allows shrinking)."""
         # The central widget's hint covers grid + footer + margins — the
         # footer no longer lives inside the grid, so measure the whole thing.
         cw = self.centralWidget()
-        cw.layout().activate()          # hint is stale until the layout runs
+        # invalidate() as well as activate(): a child whose size constraints
+        # changed this turn (the scroll viewport) leaves a stale cached hint.
+        cw.layout().invalidate()
+        cw.layout().activate()
         hint = cw.sizeHint()
         if hint.isEmpty():
             # Nothing measurable yet. Resizing to 0x0 here would make Windows
             # hide the window outright — the taskbar button vanishes and pops
             # back a frame later. Let Qt size it instead.
             self.adjustSize()
+            self._expected_size = self.size()
             return
+        # The central widget's geometry lags a window resize by a layout pass;
+        # measuring the difference before it catches up bakes the stale gap
+        # into every later fit.
+        if self.layout() is not None:
+            self.layout().activate()
         extra_h = self.height() - cw.height()
         extra_w = self.width() - cw.width()
         self.setMinimumSize(0, 0)
         cw.setMinimumSize(0, 0)
-        self.resize(hint.width() + extra_w, hint.height() + extra_h)
+
+        want_h = hint.height() + extra_h
+        want_w = hint.width() + extra_w
+        if self._scroll_area is not None:
+            # QScrollArea's own sizeHint is capped by Qt, so it under-reports
+            # a long list. Measure the real grid and add the chrome around it.
+            # One definition of chrome, used for both the fit and the snap.
+            chrome = (hint.height() - self._scroll_area.sizeHint().height()
+                      + extra_h)
+            want_h = self._content_height() + chrome
+            ceiling = self._state.window_height
+            if ceiling > 0 and want_h > ceiling:
+                # Scrollbar is about to appear — leave room so rows don't clip.
+                want_w += self._scroll_area.verticalScrollBar().sizeHint().width()
+                want_h = self._snapped_height(ceiling, chrome)
+        self._auto_resize(want_w, want_h)
 
     def show_toast(self, message, seconds=5):
         """Show a transient notification at the bottom of the window."""
@@ -1119,7 +1404,7 @@ class MainWindow(QMainWindow):
         if avail > 50:
             self._toast.setMaximumWidth(avail)
         self._toast_container.setVisible(True)
-        self.adjustSize()
+        self._shrink_to_fit()
         self._toast_timer.start(int(seconds * 1000))
 
     def _fade_toast(self):
@@ -1145,6 +1430,11 @@ class MainWindow(QMainWindow):
             self._cfg_btn.setFixedHeight(h)
             if hasattr(self, "_add_group_btn"):
                 self._add_group_btn.setFixedHeight(h)
+        # This runs deferred, after the fit that followed the rebuild — and it
+        # just changed the footer's height. Re-fit so the window isn't left
+        # short (which would show a scrollbar it doesn't need). A no-op resize
+        # when nothing moved.
+        self._shrink_to_fit()
 
     # ------------------------------------------------------------------ #
     #  Tick / autosave / snapshots                                         #

@@ -18,10 +18,17 @@ class DragController:
     collapsed groups, and rebuild methods.
     """
 
+    _ZONE = 22   # px from the viewport edge that triggers auto-scroll
+
     def __init__(self, host: MainWindow):
         self.host         = host
         self.dragging_rid = None
         self.last_row     = -1
+        self._last_pos    = None   # last cursor position, for autoscroll ticks
+        self._scroll_dir  = 0      # -1 up, +1 down, 0 idle
+        self._autoscroll  = QTimer(host)
+        self._autoscroll.setInterval(110)
+        self._autoscroll.timeout.connect(self._on_autoscroll_tick)
         self.group_rids   = None   # set of child rowids when dragging collapsed group
         self.hidden_rids  = None   # snapshot of hidden rids during separator drag
         self.visible_rids = None   # snapshot of visible rids at drag start
@@ -62,6 +69,8 @@ class DragController:
         was_group_drag   = self.group_rids is not None
         visible_snapshot = self.visible_rids
 
+        self._stop_autoscroll()
+        self._last_pos    = None
         self.dragging_rid = None
         self.last_row     = -1
         self.group_rids   = None
@@ -87,7 +96,7 @@ class DragController:
         h.setMinimumSize(0, 0)
         h.setMaximumSize(16777215, 16777215)
         h._rebuild_rows()
-        h.adjustSize()
+        h._shrink_to_fit()
 
     def handle_event(self, obj, event):
         """Handle a QEvent during an active drag. Returns True if consumed."""
@@ -100,8 +109,61 @@ class DragController:
         return False
 
     def _on_mouse_move(self, event):
+        self._last_pos = event.globalPosition().toPoint()
+        self._update_autoscroll(self._last_pos)
+        self._update_drag_position(self._last_pos)
+
+    # -- Auto-scroll while dragging against the edge of the viewport -- #
+
+    def _update_autoscroll(self, global_pos):
+        """Start/stop edge scrolling based on where the cursor is."""
+        h  = self.host
+        sa = h._scroll_area
+        if sa is None or sa.verticalScrollBar().maximum() == 0:
+            self._stop_autoscroll()
+            return
+        bar   = sa.verticalScrollBar()
+        vp    = sa.viewport()
+        y     = vp.mapFromGlobal(global_pos).y()
+        zone  = max(12, self._ZONE)
+        if y < zone and bar.value() > bar.minimum():
+            direction = -1
+        elif y > vp.height() - zone and bar.value() < bar.maximum():
+            direction = 1
+        else:
+            direction = 0
+        self._scroll_dir = direction
+        if direction:
+            if not self._autoscroll.isActive():
+                self._autoscroll.start()
+        else:
+            self._autoscroll.stop()
+
+    def _stop_autoscroll(self):
+        self._scroll_dir = 0
+        self._autoscroll.stop()
+
+    def _on_autoscroll_tick(self):
+        """Advance one row, then re-run the hit test at the held cursor.
+
+        The cursor hasn't moved, but the rows have — so the row under it is a
+        different one, and the dragged row needs to swap with it.
+        """
+        h = self.host
+        if not self.active or not self._scroll_dir or h._scroll_area is None:
+            self._stop_autoscroll()
+            return
+        bar    = h._scroll_area.verticalScrollBar()
+        before = bar.value()
+        h._scroll_by_rows(self._scroll_dir)
+        if bar.value() == before:       # reached the end of the list
+            self._stop_autoscroll()
+            return
+        if self._last_pos is not None:
+            self._update_drag_position(self._last_pos)
+
+    def _update_drag_position(self, global_pos):
         h          = self.host
-        global_pos = event.globalPosition().toPoint()
         local_pos  = h._grid_widget.mapFromGlobal(global_pos)
         target_vis = self._row_at_y(local_pos.y())
         if target_vis is None or target_vis == self.last_row:
@@ -251,16 +313,10 @@ class DragController:
                          and insert_idx < len(visible_entries) - 1
                          and row["type"] == "timer"
                          and visible_entries[insert_idx + 1][0]["type"] == "timer")
-            is_footer_row = (ss.client_separators
-                             and row["type"] == "timer"
-                             and insert_idx == len(visible_entries) - 1)
-
-            if is_footer_row:
-                border_css = f"border-bottom: 2px solid {t['chrome_line']};"
-            elif needs_sep:
-                border_css = f"border-bottom: 1px solid {t['row_line']};"
-            else:
-                border_css = ""
+            # No merged footer line: the thick rule lives below the scroll
+            # viewport now, so rows never carry it.
+            border_css = (f"border-bottom: 1px solid {t['row_line']};"
+                          if needs_sep else "")
 
             if row["type"] == "separator":
                 group_line = t["group_line"]
