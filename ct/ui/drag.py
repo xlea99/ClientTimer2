@@ -332,6 +332,9 @@ class DragController:
 
         h._grid_widget.setUpdatesEnabled(True)
         h._grid.activate()
+        # Every row's stylesheet was just rewritten, restoring the separator
+        # on whichever row was hiding it. Re-pick the bottom-most one.
+        h._update_bottom_line()
 
     def _row_at_y(self, y):
         """Return the visible row index whose vertical center is closest to y."""

@@ -8,6 +8,7 @@ from PySide6.QtWidgets import (
     QLineEdit,
     QPushButton,
     QSizePolicy,
+    QStackedWidget,
     QWidget,
 )
 from ct.core.timer_state import TimerState
@@ -127,7 +128,8 @@ class RowFactory:
                         draw_separator_line: bool,
                         shift_held: bool,
                         label_align: LabelAlign,
-                        button_visibility: str,
+                        show_adjust: bool,
+                        show_x: bool,
                         on_start: Callable[...,Any],
                         on_stop: Callable[...,Any],
                         on_adjust: Callable[...,Any],
@@ -239,7 +241,7 @@ class RowFactory:
         adj_lay.addWidget(minus_btn)
         adj_lay.addWidget(plus_btn)
         rc_lay.addWidget(adj_container)
-        adj_container.setVisible(button_visibility != "None")
+        adj_container.setVisible(show_adjust)
 
         # Col 5: X / 0
         x_btn = QPushButton("0" if shift_held else "X")
@@ -247,7 +249,10 @@ class RowFactory:
         x_btn.setFixedWidth(blueprint.col5_size.width())
         x_btn.clicked.connect(lambda _=False: on_remove(rid))
         rc_lay.addWidget(x_btn)
-        x_btn.setVisible(button_visibility == "All")
+        # Removing a row is an edit, so it lives with the other edits — behind
+        # the lock. A row full of X buttons is also the loudest possible signal
+        # that edit mode is on, which a small lock glyph never was.
+        x_btn.setVisible(show_x)
 
         widget_dict = {
             "name": name_lbl, "time": time_lbl,
@@ -298,19 +303,50 @@ class RowFactory:
         add_group_btn.clicked.connect(on_add_group)
         add_group_btn.setToolTip("Add a new separator timer to UI")
 
-        add_btns = QWidget()
-        add_btns.setObjectName("addBtns")
-        add_btns.setStyleSheet("#addBtns { background: transparent; }")
-        add_btns_lay = QHBoxLayout(add_btns)
-        add_btns_lay.setContentsMargins(0, 0, 0, 0)
-        add_btns_lay.setSpacing(blueprint.btn_spacing)
-        add_btns_lay.addWidget(add_btn)
-        add_btns_lay.addWidget(add_group_btn)
-
         add_input = QLineEdit()
         add_input.setFont(footer_font)
         add_input.setPlaceholderText("Client name...")
         add_input.returnPressed.connect(on_add_input_return)
+
+        # Edit page: everything to do with authoring the list.
+        edit_page = QWidget()
+        edit_page.setObjectName("addBtns")
+        edit_page.setStyleSheet("#addBtns { background: transparent; }")
+        edit_lay = QHBoxLayout(edit_page)
+        edit_lay.setContentsMargins(0, 0, 0, 0)
+        edit_lay.setSpacing(blueprint.btn_spacing)
+        edit_lay.addWidget(add_btn)
+        edit_lay.addWidget(add_group_btn)
+        edit_lay.addWidget(add_input, 1)
+
+        # Locked page: the status line. Text is filled in by
+        # MainWindow._update_status — this only sets up the shell.
+        status_lbl = QLabel()
+        status_lbl.setFont(footer_font)
+        status_lbl.setAlignment(Qt.AlignCenter)
+        # RichText so the running dot can carry the accent colour while the
+        # rest of the line stays muted. Only numbers and fixed words are
+        # interpolated into it — no client names — so there's nothing to escape.
+        status_lbl.setTextFormat(Qt.RichText)
+        status_lbl.setCursor(Qt.PointingHandCursor)
+        status_lbl.setStyleSheet(
+            f"color: {blueprint.theme['app_fg_muted']}; background: transparent;")
+
+        # A stack rather than show/hide: its size hint is the tallest page, so
+        # the footer is exactly one line high in BOTH modes no matter what
+        # either page grows into. Toggling the lock must never change the
+        # window's height — footer height feeds `chrome`, and `chrome` decides
+        # how many whole rows the viewport snaps to.
+        middle = QStackedWidget()
+        # Fixed vertically or the stack expands and the footer soaks up every
+        # spare pixel in the column. One line, always — that slack belongs to
+        # the row viewport.
+        middle.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        middle.setObjectName("footerMiddle")
+        middle.setStyleSheet("#footerMiddle { background: transparent; }")
+        middle.addWidget(status_lbl)
+        middle.addWidget(edit_page)
+        middle.setCurrentIndex(1 if rearranging else 0)
 
         if blueprint.has_mdl2:
             cfg_btn = QPushButton("\uE713")
@@ -330,8 +366,7 @@ class RowFactory:
         f_lay.setContentsMargins(0, 0, 0, 0)
         f_lay.setSpacing(blueprint.h_spacing)
         f_lay.addWidget(rearrange_btn)
-        f_lay.addWidget(add_btns)
-        f_lay.addWidget(add_input, 1)
+        f_lay.addWidget(middle, 1)
         f_lay.addWidget(cfg_btn)
 
         footer_widgets = {
@@ -339,6 +374,7 @@ class RowFactory:
             "add_btn": add_btn,
             "add_group_btn": add_group_btn,
             "add_input": add_input,
+            "status_lbl": status_lbl,
             "cfg_btn": cfg_btn,
         }
         return footer, footer_widgets

@@ -33,3 +33,8 @@ v1.2
 -Removed the "remove client" functionality. Instead, to remove a client, simply click the x
 button on the far right of them.
 -Few minor bugfixes
+
+v1.3
+
+-Rebuilt how UI locking/unlocking works. Row creation/deletion, reordering are now behind ui lock, and default footer is a less busy status on running timers + daily total
+-

@@ -18,6 +18,21 @@ TIERS = [
     4 * 86400,    # ~4 days ago
 ]
 
+# The tier ladder has no resolution below its smallest tier, so a burst of
+# destructive edits used to collapse to just its first and last snapshot —
+# every tier from 5 minutes to 4 days resolved to the same (oldest) file.
+# These most-recent snapshots are kept whatever their age, which is what makes
+# individual actions inside a burst recoverable.
+RECENT_KEEP = 20
+
+# Snapshots taken for a reason worth going back to (a full reset, the daily
+# rollover, app exit) outlive the ladder for this long.
+HIGH_PRIORITY_KEEP_SECS = 7 * 86400
+
+# Absolute ceiling, so nothing above can inflate without bound. A snapshot is
+# ~2.5 KB, so this is a few hundred KB at worst.
+MAX_SNAPSHOTS = 100
+
 # Writes a full copy of the state_dict as a snapshot (backupish thing)
 def create_snapshot(state_dict, reason, priority="normal"):
     snap = copy.deepcopy(state_dict)
@@ -42,6 +57,16 @@ def _parse_snapshot_time(filename):
         return datetime.strptime(parts[1], "%Y%m%d_%H%M%S_%f")
     except ValueError:
         return None
+
+
+# Reads back the priority create_snapshot recorded. Anything unreadable is
+# treated as routine, so a corrupt file can never pin itself in the keep set.
+def _snapshot_priority(path):
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            return json.load(f).get("meta", {}).get("snapshot_priority", "normal")
+    except (OSError, ValueError):
+        return "normal"
 # Use time-tier retention to remove all snapshots that don't best fit any tier. The newest snapshot is always kept.
 # We then calculate which snapshot is closest to each tier in TIERS, and delete everything else.
 def prune_snapshots():
@@ -63,9 +88,22 @@ def prune_snapshots():
     entries.sort(key=lambda e: e[1], reverse=True)
     now = datetime.now()
 
+    # Priority lives inside the file, so only read the ones we have to.
+    priorities = {}
+
+    def priority_of(filename):
+        if filename not in priorities:
+            priorities[filename] = _snapshot_priority(PATHS.snapshots / filename)
+        return priorities[filename]
+
     # Always keep newest
     keep = set()
     keep.add(entries[0][0])
+
+    # Recent buffer — the last RECENT_KEEP, regardless of age. Covers the
+    # short timespans the tier ladder can't see into.
+    for filename, _ in entries[:RECENT_KEEP]:
+        keep.add(filename)
 
     # For each tier, find closest snapshot
     for tier_secs in TIERS:
@@ -79,6 +117,29 @@ def prune_snapshots():
                 best = filename
         if best is not None:
             keep.add(best)
+
+    # High-priority snapshots survive the ladder while they're recent enough.
+    cutoff = now.timestamp() - HIGH_PRIORITY_KEEP_SECS
+    for filename, ts in entries:
+        if filename in keep or ts.timestamp() < cutoff:
+            continue
+        if priority_of(filename) == "high":
+            keep.add(filename)
+
+    # Ceiling. Drop from the oldest end, sparing high-priority until last and
+    # the newest snapshot always.
+    if len(keep) > MAX_SNAPSHOTS:
+        newest = entries[0][0]
+        oldest_first = [f for f, _ in reversed(entries) if f in keep]
+        for spare_high in (True, False):
+            for filename in oldest_first:
+                if len(keep) <= MAX_SNAPSHOTS:
+                    break
+                if filename == newest or filename not in keep:
+                    continue
+                if spare_high and priority_of(filename) == "high":
+                    continue
+                keep.discard(filename)
 
     # Delete everything not in the keep set
     pruned_count = 0

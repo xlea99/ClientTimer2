@@ -33,6 +33,7 @@ from ct.ui.drag import DragController
 from ct.ui.theme import THEMES, SIZES, build_stylesheet, build_menu_stylesheet
 from ct.ui.ui_blueprint import UIBlueprint
 from ct.ui.row_factory import RowFactory
+from ct.ui.widgets import TickCheckBox
 from ct.util import format_time
 
 # Permissive denylist: real client names use unicode, '&', '-', ',', etc.
@@ -46,6 +47,10 @@ _SANITIZE = re.compile(r"[\x00-\x1f\x7f-\x9f]+")
 # identical to having stopped.
 _WM_ENTERSIZEMOVE = 0x0231
 _WM_EXITSIZEMOVE  = 0x0232
+
+# Strips the client separator rule out of a row's stylesheet. Group headers
+# use a full "border:" box, not "border-bottom:", so they are left alone.
+_BORDER_BOTTOM = re.compile(r"border-bottom\s*:[^;]*;")
 
 
 
@@ -95,7 +100,10 @@ class MainWindow(QMainWindow):
 
         # -- Snapshot handling --
         self._last_snapshot_time = 0.0
-        self._snapshot_debounce  = 10.0  # seconds between non-high-priority snapshots
+        # Seconds between non-high-priority snapshots. Short on purpose: a
+        # snapshot is ~2.5 KB, and a rapid run of deletes/resets deserves a
+        # restore point each rather than one shared between them.
+        self._snapshot_debounce  = 2.0
 
         # -- Pre-UI startup checks --
         self._startup_checks()
@@ -108,6 +116,7 @@ class MainWindow(QMainWindow):
 
         self._time_labels    = {}    # time QLabel -> rowid, for click-to-copy
         self._scroll_area    = None  # the row viewport, rebuilt with the grid
+        self._hidden_line    = None  # (row widget, original css, stripped css)
         self._expected_size  = None  # last size we asked for ourselves
         self._programmatic_resize = False
         self._user_resizing  = False  # true between ENTER/EXITSIZEMOVE
@@ -387,6 +396,8 @@ class MainWindow(QMainWindow):
             self._rebuild_rows_impl()
             if keep:
                 self._restore_scroll(keep)
+            self._update_bottom_line()
+            self._update_status()
         finally:
             self.setUpdatesEnabled(True)
 
@@ -437,7 +448,7 @@ class MainWindow(QMainWindow):
         row_containers = []    # every row widget, for the uniform-height pass
 
         if not self._state.rows:
-            lbl = QLabel("No clients. Add one to begin!")
+            lbl = QLabel("No clients. Click the unlock button in\nthe bottom right and add one to begin!")
             lbl.setFont(QFont(ss.font, s["label"]))
             lbl.setAlignment(Qt.AlignCenter)
             self._grid.addWidget(lbl)
@@ -488,7 +499,7 @@ class MainWindow(QMainWindow):
                         is_dragging=self._drag.dragging_rid == rid,
                         collapsed=collapsed, has_running=has_running,
                         show_count=ss.show_group_count, show_time=ss.show_group_time,
-                        show_x=(ss.button_visibility == "All"),
+                        show_x=self._rearranging,
                         on_toggle=self._on_group_toggle,
                         on_remove=self._on_remove_group,
                     )
@@ -502,7 +513,8 @@ class MainWindow(QMainWindow):
                     row_container, widget_dict = RowFactory.timer(
                         blueprint=blueprint, rid=rid, row=row, state=timer_state,
                         shift_held=self._shift_held, label_align=ss.label_align,
-                        button_visibility=ss.button_visibility,
+                        show_adjust=ss.show_adjust_buttons,
+                        show_x=self._rearranging,
                         is_child=is_child,
                         is_dragging=self._drag.dragging_rid == rid,
                         draw_separator_line=needs_sep,
@@ -579,8 +591,12 @@ class MainWindow(QMainWindow):
         if sb_gap:
             scroll.verticalScrollBar().setStyleSheet(
                 f"QScrollBar:vertical {{ margin-left: {sb_gap}px; }}")
-        # Wheel scrolling moves whole rows — see eventFilter.
+        # Wheel scrolling moves whole rows — see eventFilter. The viewport's
+        # own resizes come through there too, since which row sits at the
+        # bottom edge changes with both scrolling and window height.
         scroll.viewport().installEventFilter(self)
+        scroll.verticalScrollBar().valueChanged.connect(
+            lambda _v: (self._update_bottom_line(), self._update_status()))
         content_lay.addWidget(scroll)
         self._scroll_area = scroll
 
@@ -610,6 +626,8 @@ class MainWindow(QMainWindow):
         self._add_btn        = fw["add_btn"]
         self._add_group_btn  = fw["add_group_btn"]
         self._add_input      = fw["add_input"]
+        self._status_lbl     = fw["status_lbl"]
+        self._status_lbl.installEventFilter(self)
         self._cfg_btn        = fw["cfg_btn"]
         # Footer sits outside the row grid so its gap above is governed by
         # the per-size "footer_gap", independent of v_spacing.
@@ -678,15 +696,31 @@ class MainWindow(QMainWindow):
         if self._drag.active:
             return self._drag.handle_event(obj, event)
 
-        # Wheel over the row viewport: advance by whole rows, not pixels.
-        if (event.type() == QEvent.Wheel and self._scroll_area is not None
-                and obj is self._scroll_area.viewport()):
-            delta = event.angleDelta().y()
-            if delta:
-                notches = -delta / 120.0
-                rows = int(notches) or (1 if notches > 0 else -1)
-                self._scroll_by_rows(rows)
-            return True
+        if self._scroll_area is not None and obj is self._scroll_area.viewport():
+            # Wheel over the row viewport: advance by whole rows, not pixels.
+            if event.type() == QEvent.Wheel:
+                delta = event.angleDelta().y()
+                if delta:
+                    notches = -delta / 120.0
+                    rows = int(notches) or (1 if notches > 0 else -1)
+                    self._scroll_by_rows(rows)
+                return True
+            # A shorter viewport puts a different row against the bottom edge,
+            # and can push a running timer out of view.
+            if event.type() == QEvent.Resize:
+                self._update_bottom_line()
+                self._update_status()
+
+        # The footer status line is a click target too.
+        if obj is getattr(self, "_status_lbl", None):
+            if event.type() == QEvent.Enter:
+                self._on_status_hover(True)
+            elif event.type() == QEvent.Leave:
+                self._on_status_hover(False)
+            elif (event.type() == QEvent.MouseButtonPress
+                  and event.button() == Qt.LeftButton):
+                self._on_status_click()
+                return True
 
         # The time label is its own hover/click target inside the row.
         time_rid = self._time_labels.get(obj)
@@ -728,10 +762,12 @@ class MainWindow(QMainWindow):
         else:
             self._start_exclusive(rowid)
         self._save_state()
+        self._update_status()
 
     def _on_stop(self, rowid):
         self._stop_one(rowid)
         self._save_state()
+        self._update_status()
 
     def _on_adjust(self, rowid, direction):
         minutes = 1 if (QApplication.keyboardModifiers() & Qt.ShiftModifier) else 5
@@ -739,6 +775,7 @@ class MainWindow(QMainWindow):
         self._update_display(rowid)
         self._update_parent_group_time(rowid)
         self._save_state()
+        self._update_status()
 
     def _on_add(self):
         raw  = self._add_input.text().strip()
@@ -765,15 +802,46 @@ class MainWindow(QMainWindow):
         self._try_snapshot(reason="layout_change", priority="medium")
         self._rebuild_rows()
 
+    def _confirm(self, setting, title, question, disabled_msg):
+        """Ask before something destructive, with a 'Don't ask again' opt-out.
+
+        `setting` names the Settings flag that gates the prompt. The tickbox
+        only takes effect when the user actually confirms — ticking it and
+        then backing out shouldn't silently disarm the next one.
+        """
+        if not getattr(self._state.settings, setting):
+            return True
+        t = THEMES.get(self._state.settings.theme, THEMES["E-Ink (Default)"])
+        box = QMessageBox(QMessageBox.Question, title, question,
+                          QMessageBox.Yes | QMessageBox.No, self)
+        # Same box as "Show Zero Times" in the session preview — a plain
+        # QCheckBox here renders no box and no tick at all.
+        never_again = TickCheckBox("Don't ask again", t["row_running_fg"])
+        never_again.setStyleSheet(TickCheckBox.style_for(t))
+        box.setCheckBox(never_again)
+        if box.exec() != QMessageBox.Yes:
+            return False
+        if never_again.isChecked():
+            setattr(self._state.settings, setting, False)
+            self._save_state()
+            self.show_toast(disabled_msg, 6)
+        return True
+
+    def _confirm_delete(self, question):
+        return self._confirm(
+            "confirm_delete", "Confirm Delete", question,
+            "Delete confirmations off, can be toggled back on in Settings")
+
+    def _confirm_reset(self, question):
+        return self._confirm(
+            "confirm_reset", "Confirm Reset", question,
+            "Reset confirmations off, can be toggled back on in Settings")
+
     def _on_remove_group(self, rowid):
-        if self._state.settings.confirm_delete:
-            name = next(
-                (r["name"] for r in self._state.rows if r["rowid"] == rowid), "")
-            if QMessageBox.question(
-                    self, "Confirm Delete",
-                    f"Delete group '{name}'?"
-            ) != QMessageBox.Yes:
-                return
+        name = next(
+            (r["name"] for r in self._state.rows if r["rowid"] == rowid), "")
+        if not self._confirm_delete(f"Delete group '{name}'?"):
+            return
         self._state.collapsed_groups.discard(rowid)
         self._state.rows = [r for r in self._state.rows if r["rowid"] != rowid]
         self._save_state()
@@ -792,28 +860,12 @@ class MainWindow(QMainWindow):
 
     def _on_remove(self, rowid):
         if QApplication.keyboardModifiers() & Qt.ShiftModifier:
-            if self._state.settings.confirm_reset:
-                name = self.timers[rowid].name
-                if QMessageBox.question(
-                        self, "Confirm Reset",
-                        f"Reset timer '{name}' to zero?"
-                ) != QMessageBox.Yes:
-                    return
-            self.timers[rowid].stop()
-            self.timers[rowid].reset()
-            self._set_bold(rowid, False)
-            self._update_display(rowid)
-            self._update_parent_group_time(rowid)
-            self._save_state()
+            self._reset_one(rowid)
         else:
-            if self._state.settings.confirm_delete:
-                name = next(
-                    (r["name"] for r in self._state.rows if r["rowid"] == rowid), "")
-                if QMessageBox.question(
-                        self, "Confirm Delete",
-                        f"Delete '{name}'?"
-                ) != QMessageBox.Yes:
-                    return
+            name = next(
+                (r["name"] for r in self._state.rows if r["rowid"] == rowid), "")
+            if not self._confirm_delete(f"Delete '{name}'?"):
+                return
             self.timers[rowid].stop()
             del self.timers[rowid]
             self._state.rows = [r for r in self._state.rows if r["rowid"] != rowid]
@@ -857,6 +909,125 @@ class MainWindow(QMainWindow):
             f.setUnderline(entering)
             lbl.setFont(f)
 
+    # ------------------------------------------------------------------ #
+    #  Footer status line (locked mode)                                    #
+    # ------------------------------------------------------------------ #
+
+    def _running_rids(self):
+        return [rid for rid, ts in self.timers.items() if ts.running]
+
+    def _running_offscreen(self):
+        """True when a running timer isn't fully in view.
+
+        This is what the dot's colour reports: muted when everything running
+        is on screen (nothing to tell you), accent when it isn't.
+        """
+        if self._scroll_area is None:
+            return False
+        top = self._scroll_area.verticalScrollBar().value()
+        bot = top + self._scroll_area.viewport().height()
+        for rid in self._running_rids():
+            w = self._widgets.get(rid, {}).get("container")
+            if w is None:
+                return True          # hidden inside a collapsed group
+            if w.y() < top or w.y() + w.height() > bot:
+                return True
+        return False
+
+    def _update_status(self):
+        """Refresh the locked footer's status line.
+
+        Deliberately additive: the total is the plain sum of every row, so it
+        always matches what a user gets by adding the rows up by hand. Running
+        two timers at once therefore advances it at 2s/s — the count sitting
+        right beside it is what explains that.
+        """
+        if not hasattr(self, "_status_lbl"):
+            return
+        t = THEMES.get(self._state.settings.theme, THEMES["E-Ink (Default)"])
+        running = len(self._running_rids())
+        total   = sum(ts.current_elapsed for ts in self.timers.values())
+        # "Today" only means anything while daily reset is drawing the
+        # boundary. With it off, session_start never advances on its own, so
+        # the app can't honestly name the period — so it doesn't claim one.
+        daily   = self._state.settings.daily_reset_enabled
+        period  = "Today" if daily else "Total"
+        parts = []
+        if running:
+            # Accent only when there's something you can't already see —
+            # otherwise the dot is just punctuation and shouldn't shout.
+            dot = (t["row_running_fg"] if self._running_offscreen()
+                   else t["app_fg_muted"])
+            parts.append(f"<span style='color: {dot};'>●</span>"
+                         f" {running} running")
+        parts.append(f"{period} {format_time(total)}")
+        self._status_lbl.setText(" · ".join(parts))
+        self._status_lbl.setToolTip(
+            f"Since {self._state.session_start.strftime('%#I:%M %p')}"
+            if daily else "")
+
+    def _on_status_hover(self, entering):
+        f = self._status_lbl.font()
+        f.setUnderline(entering)
+        self._status_lbl.setFont(f)
+
+    def _on_status_click(self):
+        """Nothing running: copy the session. Running: go to it."""
+        running = self._running_rids()
+        if not running:
+            self._copy_session()
+        elif len(running) == 1:
+            self._scroll_to_row(running[0])
+        else:
+            # More than one and no unambiguous target, so ask. Same menu
+            # machinery as the row context menu.
+            menu = QMenu(self)
+            menu.setStyleSheet(build_menu_stylesheet(self._state.settings.theme))
+            actions = {menu.addAction(self.timers[rid].name): rid
+                       for rid in running}
+            chosen = menu.exec(self._status_lbl.mapToGlobal(
+                self._status_lbl.rect().bottomLeft()))
+            if chosen is not None:
+                self._scroll_to_row(actions[chosen])
+
+    def _scroll_to_row(self, rid):
+        """Bring a row into view, keeping the viewport flush to a boundary."""
+        # A timer inside a collapsed group has no widget on screen at all.
+        parent = self._parent_group(rid)
+        if parent is not None and parent in self._state.collapsed_groups:
+            self._state.collapsed_groups.discard(parent)
+            self._save_state()
+            self._rebuild_rows()
+            self._shrink_to_fit()
+        w = self._widgets.get(rid, {}).get("container")
+        if w is None or self._scroll_area is None:
+            return
+        bar = self._scroll_area.verticalScrollBar()
+        view_top = bar.value()
+        view_bot = view_top + self._scroll_area.viewport().height()
+        if w.y() >= view_top and w.y() + w.height() <= view_bot:
+            return                       # already fully visible, don't jolt
+        # Its own y() is by definition a flush position — see _row_offsets.
+        bar.setValue(min(w.y(), bar.maximum()))
+
+    def _copy_session(self):
+        """Copy every non-zero time to the clipboard, one row per line."""
+        lines = []
+        for row in self._state.rows:
+            if row["type"] != "timer":
+                continue
+            ts = self.timers.get(row["rowid"])
+            if ts is None or ts.current_elapsed < 1:
+                continue
+            lines.append(f"{ts.name}: {format_time(ts.current_elapsed)}")
+        if not lines:
+            self.show_toast("No times to copy yet", 4)
+            return
+        QApplication.clipboard().setText("\n".join(lines))
+        self.show_toast(
+            f"{len(lines)} client time{'s' if len(lines) > 1 else ''} "
+            f"copied to clipboard", 4)
+
     def _copy_timer_time(self, rid):
         """Copy a live timer's current time to the clipboard, and toast it."""
         if rid not in self.timers:
@@ -879,12 +1050,47 @@ class MainWindow(QMainWindow):
         menu.addSeparator()
         set_color    = menu.addAction("Set Color")
         reset_color  = menu.addAction("Reset Color")
+        # View actions live here rather than in the footer: they're episodic,
+        # and the right-click menu is reachable from any row, so they cost no
+        # permanent screen space.
         menu.addSeparator()
-        set_time     = menu.addAction("Set Time") if is_timer else None
+        group_rids   = [r["rowid"] for r in self._state.rows
+                        if r["type"] == "separator"]
+        collapsed    = self._state.collapsed_groups
+        collapse_all = menu.addAction("Collapse All")
+        expand_all   = menu.addAction("Expand All")
+        collapse_all.setEnabled(any(g not in collapsed for g in group_rids))
+        expand_all.setEnabled(any(g in collapsed for g in group_rids))
+
+        menu.addSeparator()
+        set_time      = menu.addAction("Set Time") if is_timer else None
+        reset_time    = menu.addAction("Reset Time") if is_timer else None
+        if reset_time is not None:
+            reset_time.setEnabled(self.timers[rowid].current_elapsed >= 1)
+        reset_all     = menu.addAction("Reset ALL Times")
+        reset_all.setEnabled(
+            any(ts.current_elapsed >= 1 for ts in self.timers.values()))
         delete_action = menu.addAction("Delete")
 
         action = menu.exec(global_pos)
         if action is None:
+            return
+
+        if action == reset_all:
+            self._reset_all()
+            return
+        if is_timer and action == reset_time:
+            self._reset_one(rowid)
+            return
+
+        if action in (collapse_all, expand_all):
+            if action == collapse_all:
+                collapsed.update(group_rids)
+            else:
+                collapsed.clear()
+            self._save_state()
+            self._rebuild_rows()
+            self._shrink_to_fit()
             return
 
         if action == rename_action:
@@ -942,12 +1148,8 @@ class MainWindow(QMainWindow):
                     self._update_parent_group_time(rowid)
                     self._save_state()
         elif action == delete_action:
-            if self._state.settings.confirm_delete:
-                if QMessageBox.question(
-                        self, "Confirm Delete",
-                        f"Delete '{row['name']}'?"
-                ) != QMessageBox.Yes:
-                    return
+            if not self._confirm_delete(f"Delete '{row['name']}'?"):
+                return
             if is_timer:
                 self.timers[rowid].stop()
                 del self.timers[rowid]
@@ -1012,7 +1214,7 @@ class MainWindow(QMainWindow):
                 and (not old_dr_enabled or s.daily_reset_time != old_dr_time)):
             self._state.session_start = datetime.now().astimezone()
         s.snapshot_min_minutes = dlg.chosen_snapshot_min_minutes
-        s.button_visibility    = dlg.chosen_button_visibility
+        s.show_adjust_buttons  = dlg.chosen_show_adjust_buttons
 
         self._save_state()
         self._try_snapshot(reason="layout_change", priority="high")
@@ -1089,16 +1291,37 @@ class MainWindow(QMainWindow):
             self._set_bold(rowid, False)
             self._update_display(rowid)
 
+    def _reset_one(self, rowid):
+        """Zero a single timer, after confirming. Shared by shift-X and the
+        context menu's Reset Time."""
+        if rowid not in self.timers:
+            return
+        name = self.timers[rowid].name
+        if not self._confirm_reset(f"Reset timer '{name}' to zero?"):
+            return
+        # Before the wipe, not after — the snapshot has to hold the time that
+        # is about to be thrown away. Same treatment a deleted row gets.
+        self._try_snapshot(reason="reset_timer", priority="medium")
+        self.timers[rowid].stop()
+        self.timers[rowid].reset()
+        self._set_bold(rowid, False)
+        self._update_display(rowid)
+        self._update_parent_group_time(rowid)
+        self._save_state()
+        self._update_status()
+
     def _reset_all(self):
-        if QMessageBox.question(
-                self, "Confirm", "Reset all times to zero?"
-        ) == QMessageBox.Yes:
-            self._stop_all()
-            for ts in self.timers.values():
-                ts.reset()
-            self._save_state()
-            self._rebuild_rows()
-            self.show_toast("Reset all times to zero.")
+        if not self._confirm_reset("Reset ALL times to zero?"):
+            return
+        # high priority: this is the largest data loss the app can do, so it
+        # snapshots unconditionally rather than being debounced away.
+        self._try_snapshot(reason="reset_all", priority="high")
+        self._stop_all()
+        for ts in self.timers.values():
+            ts.reset()
+        self._save_state()
+        self._rebuild_rows()
+        self.show_toast("Reset all times to zero.")
 
     # ------------------------------------------------------------------ #
     #  Display helpers                                                     #
@@ -1304,6 +1527,54 @@ class MainWindow(QMainWindow):
         target = max(0, min(len(offsets) - 1, idx + rows))
         bar.setValue(min(offsets[target], bar.maximum()))
 
+    def _update_bottom_line(self):
+        """Drop the client separator under the bottom-most visible row.
+
+        The thick footer rule sits just below the viewport, so whichever row
+        is flush with the bottom edge draws its own thin line a couple of
+        pixels above it — two rules stacked, which reads as a mistake. Which
+        row that is changes with every scroll, so it can't be decided at
+        build time the way the last row's line is.
+
+        Only the painted border is removed; the row keeps its reserved gap,
+        so no geometry moves and the uniform row pitch is untouched.
+        """
+        prev = self._hidden_line
+        self._hidden_line = None
+        if prev is not None:
+            w, original, applied = prev
+            try:
+                # Don't clobber a stylesheet something else has re-set since
+                # (a drag reorder rewrites every row's).
+                if w.styleSheet() == applied:
+                    w.setStyleSheet(original)
+            except RuntimeError:
+                pass                      # container died with a rebuild
+
+        if self._scroll_area is None:
+            return
+        self._grid.activate()
+        vp_bottom = (self._scroll_area.verticalScrollBar().value()
+                     + self._scroll_area.viewport().height())
+        # A cut landing in the gap between two rows still leaves the upper
+        # row's line showing right above the footer rule, so count that as
+        # flush too. Any deeper and a partial row covers it.
+        tol = max(self._grid.spacing(), 2)
+        target = None
+        for i in range(self._grid.count()):
+            w = self._grid.itemAt(i).widget()
+            if w is not None and 0 <= vp_bottom - (w.y() + w.height()) <= tol:
+                target = w
+                break
+        if target is None:
+            return
+        original = target.styleSheet()
+        stripped = _BORDER_BOTTOM.sub("", original)
+        if stripped == original:
+            return                        # this row draws no line anyway
+        target.setStyleSheet(stripped)
+        self._hidden_line = (target, original, stripped)
+
     def _content_height(self):
         heights = self._row_heights()
         if not heights:
@@ -1423,13 +1694,18 @@ class MainWindow(QMainWindow):
             self._shrink_to_fit()
 
     def _sync_footer_heights(self):
-        if hasattr(self, "_add_btn") and self._add_btn.height() > 0:
-            h = self._add_btn.height()
-            self._add_input.setFixedHeight(h)
-            self._rearrange_btn.setFixedHeight(h)
-            self._cfg_btn.setFixedHeight(h)
-            if hasattr(self, "_add_group_btn"):
-                self._add_group_btn.setFixedHeight(h)
+        # sizeHint, not height(): the edit controls live on a stacked page that
+        # is never laid out while the footer is locked, so their height() is a
+        # meaningless default (Qt's 640x480) — pinning everything to that blew
+        # the footer up to ~480px tall. A size hint is valid either way.
+        if hasattr(self, "_add_btn") and self._add_btn.sizeHint().height() > 0:
+            h = self._add_btn.sizeHint().height()
+            for w in (self._add_btn, self._add_group_btn, self._add_input,
+                      self._rearrange_btn, self._cfg_btn,
+                      # The locked page must measure exactly the same as the
+                      # edit page — see the stack in RowFactory.footer.
+                      self._status_lbl):
+                w.setFixedHeight(h)
         # This runs deferred, after the fit that followed the rebuild — and it
         # just changed the footer's height. Re-fit so the window isn't left
         # short (which would show a scrollbar it doesn't need). A no-op resize
@@ -1456,6 +1732,11 @@ class MainWindow(QMainWindow):
                     if self._state.settings.show_group_count:
                         w["count"].setText(
                             f"({len(self._group_children(rid))})")
+
+        # Unconditional: the total also moves on manual edits (Set Time,
+        # +5/-5). setText early-returns when the string is unchanged, so an
+        # idle app doesn't repaint here every second.
+        self._update_status()
 
         if self._state.settings.daily_reset_enabled:
             self._check_daily_reset_boundary()

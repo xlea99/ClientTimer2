@@ -71,11 +71,12 @@ class Settings:
     daily_reset_enabled:  bool = True
     daily_reset_time:     str  = "03:00"
     snapshot_min_minutes: int  = 5
-    button_visibility:    str  = "All"
+    show_adjust_buttons:  bool = True
     recover_running_time: bool = True
 
     @classmethod
     def from_dict(cls, d: dict) -> "Settings":
+        d = cls._migrate(d)
         values = {}
         coerced = []
         for k, default in _SETTINGS_DEFAULTS.items():
@@ -90,6 +91,19 @@ class Settings:
         # MainWindow reads this at startup to toast the user about it.
         obj.coerced_keys = coerced
         return obj
+
+    @staticmethod
+    def _migrate(d: dict) -> dict:
+        """Rewrite settings saved by an older version into current keys."""
+        if "button_visibility" not in d:
+            return d
+        # The X button used to be user-configurable ("All" / "Adjust Only" /
+        # "None"); it now appears only in edit mode, so all that survives is
+        # whether the +5/-5 pair is shown.
+        d = dict(d)
+        d.setdefault("show_adjust_buttons", d.pop("button_visibility") != "None")
+        d.pop("button_visibility", None)
+        return d
 
     def to_dict(self) -> dict:
         return dataclasses.asdict(self)

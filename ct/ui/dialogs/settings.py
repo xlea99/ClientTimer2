@@ -4,21 +4,12 @@ import json
 import re
 from datetime import datetime
 from pathlib import Path
-from PySide6.QtCore import Qt, QPointF, QTime, QUrl, Signal
-from PySide6.QtGui import (
-    QColor,
-    QDesktopServices,
-    QFont,
-    QFontMetrics,
-    QPainter,
-    QPen,
-    QPolygonF,
-)
+from PySide6.QtCore import Qt, QTime, QUrl, Signal
+from PySide6.QtGui import QDesktopServices, QFont, QFontMetrics
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QAbstractSpinBox,
     QApplication,
-    QCheckBox,
     QComboBox,
     QDialog,
     QFrame,
@@ -32,8 +23,6 @@ from PySide6.QtWidgets import (
     QSizePolicy,
     QSpinBox,
     QStackedWidget,
-    QStyle,
-    QStyleOptionButton,
     QTableWidget,
     QTableWidgetItem,
     QTimeEdit,
@@ -42,6 +31,7 @@ from PySide6.QtWidgets import (
 )
 from ct.common.setup import PATHS
 from ct.ui.theme import THEMES, SIZES, FONTS
+from ct.ui.widgets import TickCheckBox
 from ct.util import format_time
 
 
@@ -54,40 +44,6 @@ class PreviewRow(QWidget):
         if event.button() == Qt.LeftButton:
             self.clicked.emit()
         super().mousePressEvent(event)
-
-
-class TickCheckBox(QCheckBox):
-    """A checkbox that keeps its stylesheet-drawn box AND shows a tick.
-
-    Styling QCheckBox::indicator hands indicator painting to the stylesheet,
-    which draws the border/background but no check mark. So the base class
-    paints the box and the label, and we draw the tick over it ourselves.
-    """
-
-    def __init__(self, text, tick_color, parent=None):
-        super().__init__(text, parent)
-        self._tick_color = QColor(tick_color)
-
-    def paintEvent(self, event):
-        super().paintEvent(event)
-        if not self.isChecked():
-            return
-        opt = QStyleOptionButton()
-        self.initStyleOption(opt)
-        r = self.style().subElementRect(QStyle.SE_CheckBoxIndicator, opt, self)
-        p = QPainter(self)
-        p.setRenderHint(QPainter.Antialiasing)
-        pen = QPen(self._tick_color, max(1.6, r.height() * 0.16))
-        pen.setCapStyle(Qt.RoundCap)
-        pen.setJoinStyle(Qt.RoundJoin)
-        p.setPen(pen)
-        x, y, w, h = r.x(), r.y(), r.width(), r.height()
-        p.drawPolyline(QPolygonF([
-            QPointF(x + w * 0.24, y + h * 0.52),
-            QPointF(x + w * 0.43, y + h * 0.72),
-            QPointF(x + w * 0.77, y + h * 0.29),
-        ]))
-        p.end()
 
 
 def _format_span(start_iso, end_iso):
@@ -132,7 +88,7 @@ class ConfigDialog(QDialog):
         self.chosen_confirm_reset = cfg.get("confirm_reset", True)
         self.chosen_daily_reset_enabled = cfg.get("daily_reset_enabled", True)
         self.chosen_daily_reset_time = cfg.get("daily_reset_time", "03:00")
-        self.chosen_button_visibility = cfg.get("button_visibility", "All")
+        self.chosen_show_adjust_buttons = cfg.get("show_adjust_buttons", True)
         self.chosen_recover_running_time = cfg.get("recover_running_time", True)
         self.restore_path = None
         self.style_changed = False
@@ -589,15 +545,7 @@ class ConfigDialog(QDialog):
             zero_cb = TickCheckBox("Show Zero Times", t["row_running_fg"])
             zero_cb.setFont(QFont("Calibri", 9))
             zero_cb.setChecked(self._show_zero_times)
-            # Note the explicit QCheckBox selector: bare properties and
-            # selector rules can't be mixed in one stylesheet (it voids both).
-            # The box looks the same checked or not; TickCheckBox draws the
-            # tick on top, since a styled indicator loses Qt's native one.
-            zero_cb.setStyleSheet(
-                f"QCheckBox {{ color: {t['app_fg']}; background: transparent; }}"
-                f"QCheckBox::indicator {{ width: 13px; height: 13px;"
-                f" border: 1px solid {t['chrome_line']};"
-                f" background: {t['app_bg']}; }}")
+            zero_cb.setStyleSheet(TickCheckBox.style_for(t))
             zero_cb.toggled.connect(self._on_show_zero_times)
             lay.addWidget(zero_cb)
 
@@ -1042,20 +990,23 @@ class ConfigDialog(QDialog):
         row.addWidget(self._grp_time)
         lay.addLayout(row)
 
-        # -- Button Visibility --
+        # -- Adjust Buttons --
         row = QHBoxLayout()
-        lbl = QLabel("Button Visibility:")
-        btn_vis_tooltip = "Controls which action buttons are shown on each timer row."
+        lbl = QLabel("Adjust Buttons:")
+        adj_tooltip = ("Show the +5/-5 buttons on each timer row. The X button "
+                       "is not configurable — it appears only while the layout "
+                       "is unlocked.")
         lbl.setFont(QFont("Calibri", 12, QFont.Bold))
-        lbl.setToolTip(btn_vis_tooltip)
-        self._btn_vis = QComboBox()
-        self._btn_vis.addItems(["All", "Adjust Only", "None"])
-        self._btn_vis.setCurrentText(cfg.get("button_visibility", "All"))
-        self._btn_vis.setMinimumWidth(230)
-        self._btn_vis.setToolTip(btn_vis_tooltip)
-        self._btn_vis.currentTextChanged.connect(self._refresh_preview)
+        lbl.setToolTip(adj_tooltip)
+        self._adj_btns = QComboBox()
+        self._adj_btns.addItems(["Yes", "No"])
+        self._adj_btns.setCurrentText(
+            "Yes" if cfg.get("show_adjust_buttons", True) else "No")
+        self._adj_btns.setMinimumWidth(230)
+        self._adj_btns.setToolTip(adj_tooltip)
+        self._adj_btns.currentTextChanged.connect(self._refresh_preview)
         row.addWidget(lbl)
-        row.addWidget(self._btn_vis)
+        row.addWidget(self._adj_btns)
         lay.addLayout(row)
 
         # -- Live preview (group + 2 timers) --
@@ -1295,14 +1246,15 @@ class ConfigDialog(QDialog):
         self._p_gtime.setVisible(
             self._grp_time.currentText() == "Yes")
 
-        # Button visibility
-        bv = self._btn_vis.currentText()
-        show_adjust = bv != "None"
-        show_x      = bv == "All"
+        # Adjust buttons
+        show_adjust = self._adj_btns.currentText() == "Yes"
         for w in (self._p1_minus, self._p1_plus, self._p2_minus, self._p2_plus):
             w.setVisible(show_adjust)
+        # The preview shows the app as it looks while locked, which is how it
+        # looks nearly all the time — so no X buttons. They're still built
+        # above because the row sizing maths uses their column width.
         for w in (self._p1_x, self._p2_x, self._p_gx):
-            w.setVisible(show_x)
+            w.setVisible(False)
 
     # ------------------------------------------------------------------ #
     #  Apply                                                               #
@@ -1334,7 +1286,7 @@ class ConfigDialog(QDialog):
             self._grp_count.currentText() == "Yes")
         self.chosen_show_group_time = (
             self._grp_time.currentText() == "Yes")
-        self.chosen_button_visibility = self._btn_vis.currentText()
+        self.chosen_show_adjust_buttons = self._adj_btns.currentText() == "Yes"
         # Only flag a change if something actually differs from the values
         # the dialog opened with — otherwise Apply is a no-op for the caller.
         chosen = {
@@ -1351,7 +1303,7 @@ class ConfigDialog(QDialog):
             "daily_reset_enabled":  self.chosen_daily_reset_enabled,
             "daily_reset_time":     self.chosen_daily_reset_time,
             "snapshot_min_minutes": self.chosen_snapshot_min_minutes,
-            "button_visibility":    self.chosen_button_visibility,
+            "show_adjust_buttons":  self.chosen_show_adjust_buttons,
             "recover_running_time": self.chosen_recover_running_time,
         }
         self.style_changed = any(
