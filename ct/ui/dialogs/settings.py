@@ -17,6 +17,7 @@ from PySide6.QtWidgets import (
     QHeaderView,
     QLabel,
     QListWidget,
+    QMenu,
     QMessageBox,
     QPushButton,
     QScrollArea,
@@ -30,7 +31,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 from ct.common.setup import PATHS
-from ct.ui.theme import THEMES, SIZES, FONTS
+from ct.ui.theme import THEMES, SIZES, FONTS, build_menu_stylesheet
 from ct.ui.widgets import TickCheckBox
 from ct.util import format_time
 
@@ -91,6 +92,7 @@ class ConfigDialog(QDialog):
         self.chosen_show_adjust_buttons = cfg.get("show_adjust_buttons", True)
         self.chosen_recover_running_time = cfg.get("recover_running_time", True)
         self.restore_path = None
+        self.restore_mode = "all"     # "all" | "times" | "rows"
         self.style_changed = False
 
         # Kept for comparison in _apply — no changes means no rebuild.
@@ -342,6 +344,10 @@ class ConfigDialog(QDialog):
         self._snap_table.setMinimumHeight(160)
         self._snap_table.itemSelectionChanged.connect(
             lambda: self._on_table_selected(self._snap_table, self._snap_paths))
+        self._snap_table.setContextMenuPolicy(Qt.CustomContextMenu)
+        self._snap_table.customContextMenuRequested.connect(
+            lambda pos: self._on_history_context_menu(
+                self._snap_table, self._snap_paths, pos))
         backup_lay.addWidget(self._snap_table)
 
         self._restore_btn = QPushButton("Restore")
@@ -448,7 +454,93 @@ class ConfigDialog(QDialog):
         )
         if answer == QMessageBox.Yes:
             self.restore_path = path
+            self.restore_mode = "all"
             self.accept()
+
+    # ------------------------------------------------------------------ #
+    #  Right-click on a backup / completed session                         #
+    # ------------------------------------------------------------------ #
+
+    # (menu label, restore mode, what the confirmation should warn about)
+    _RESTORE_MODES = (
+        ("Restore Times and Rows", "all",
+         "This replaces every row and every time with the ones from this "
+         "entry."),
+        ("Restore Times Only", "times",
+         "Times come back for clients that still exist. Rows, groups and "
+         "ordering are left alone."),
+        ("Restore Rows Only", "rows",
+         "Rows, groups and ordering come back. Times you have now are kept "
+         "for rows that survive; rows not in this entry are removed."),
+    )
+
+    def _on_history_context_menu(self, table, paths, pos):
+        row = table.rowAt(pos.y())
+        if row < 0 or row >= len(paths):
+            return
+        table.selectRow(row)
+        path  = paths[row]
+        label = " ".join(table.item(row, 0).text().split())
+
+        menu = QMenu(self)
+        menu.setStyleSheet(build_menu_stylesheet(self._theme.currentText()))
+        actions = {}
+        # Copying is not destructive, so it gets its own section away from
+        # the three that are.
+        copy_action = menu.addAction("Copy All Times")
+        menu.addSeparator()
+
+        for text, mode, warning in self._RESTORE_MODES:
+            actions[menu.addAction(text)] = (mode, warning)
+
+        chosen = menu.exec(table.viewport().mapToGlobal(pos))
+        if chosen is None:
+            return
+        if chosen is copy_action:
+            self._copy_session_times(path, label)
+            return
+
+        mode, warning = actions[chosen]
+        if QMessageBox.question(
+                self, chosen.text(),
+                f"{chosen.text()} from:\n{label}\n\n{warning}",
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.No) != QMessageBox.Yes:
+            return
+        self.restore_path = path
+        self.restore_mode = mode
+        self.accept()
+
+    def _copy_session_times(self, path, label):
+        """Clipboard copy of one saved entry, matching the main window's
+        'copy the whole session' format."""
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+        except (OSError, ValueError):
+            self._toast_main("Couldn't read that entry — nothing copied")
+            return
+        tracked = data.get("session", {}).get("tracked_times", {})
+        lines = []
+        for row in data.get("layout", {}).get("rows", []):
+            if row.get("type") != "timer":
+                continue
+            elapsed = int(tracked.get(str(row.get("rowid")), {})
+                          .get("elapsed", 0))
+            if elapsed < 1:
+                continue
+            lines.append(f"{row.get('name', '')}: {format_time(elapsed)}")
+        if not lines:
+            self._toast_main(f"No times to copy from {label}")
+            return
+        QApplication.clipboard().setText("\n".join(lines))
+        self._toast_main(f"{len(lines)} client time"
+                         f"{'' if len(lines) == 1 else 's'} copied from {label}")
+
+    def _toast_main(self, message):
+        main = self.parentWidget()
+        if main is not None and hasattr(main, "show_toast"):
+            main.show_toast(message, 4)
 
     # ------------------------------------------------------------------ #
     #  Shared table selection / state preview                              #
@@ -839,6 +931,10 @@ class ConfigDialog(QDialog):
         self._session_table.setMinimumHeight(160)
         self._session_table.itemSelectionChanged.connect(
             lambda: self._on_table_selected(self._session_table, self._session_paths))
+        self._session_table.setContextMenuPolicy(Qt.CustomContextMenu)
+        self._session_table.customContextMenuRequested.connect(
+            lambda pos: self._on_history_context_menu(
+                self._session_table, self._session_paths, pos))
         lay.addWidget(self._session_table)
 
         # Open Sessions Folder button

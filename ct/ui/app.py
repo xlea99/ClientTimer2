@@ -1184,7 +1184,7 @@ class MainWindow(QMainWindow):
         if dlg.exec() != QDialog.Accepted:
             return
         if dlg.restore_path:
-            self._restore_from_snapshot(dlg.restore_path)
+            self._restore_from_snapshot(dlg.restore_path, dlg.restore_mode)
             return
         if not dlg.style_changed:
             return
@@ -1234,24 +1234,109 @@ class MainWindow(QMainWindow):
                     Qt.WindowStaysOnTopHint, self._state.settings.always_on_top)
                 self.show()
 
-    def _restore_from_snapshot(self, path: Path):
+    @staticmethod
+    def _timer_rows(rows):
+        return [r for r in rows if r["type"] == "timer"]
+
+    def _restore_times_only(self, snap):
+        """Bring back elapsed times for clients that still exist. Layout,
+        ordering and groups are left exactly as they are.
+
+        Matched on rowid first, then on name — a client that was deleted and
+        re-added has a new rowid but is still, to the user, the same client.
+        """
+        live_rids = {r["rowid"] for r in self._timer_rows(self._state.rows)}
+        by_name = {}
+        for r in self._timer_rows(self._state.rows):
+            by_name.setdefault(r["name"], []).append(r["rowid"])
+
+        used, count = set(), 0
+        for row in self._timer_rows(snap.rows):
+            rid = row["rowid"]
+            target = rid if (rid in live_rids and rid not in used) else None
+            if target is None:
+                for cand in by_name.get(row["name"], []):
+                    if cand not in used:
+                        target = cand
+                        break
+            if target is None or target not in self.timers:
+                continue
+            used.add(target)
+            ts = self.timers[target]
+            ts.stop()
+            ts.elapsed = float(
+                snap.tracked_times.get(str(rid), {}).get("elapsed", 0.0))
+            count += 1
+        return count
+
+    def _restore_rows_only(self, snap):
+        """Restore the layout only.
+
+        A row that survives the swap keeps the time it has right now; a row
+        coming back from the snapshot starts at zero. Rows that exist live but
+        aren't in the snapshot go away with it — that is what restoring a
+        layout means. The pre-restore snapshot is the way back.
+        """
+        kept = {rid: ts.current_elapsed for rid, ts in self.timers.items()}
+        kept_by_name = {}
+        for r in self._timer_rows(self._state.rows):
+            if r["rowid"] in kept:
+                kept_by_name.setdefault(r["name"], []).append(r["rowid"])
+
+        self._state.rows = [dict(r) for r in snap.rows]
+        self._state.collapsed_groups = set(snap.collapsed_groups)
+        self.timers = {}
+        used, carried = set(), 0
+        for row in self._timer_rows(self._state.rows):
+            rid = row["rowid"]
+            elapsed = 0.0
+            if rid in kept and rid not in used:
+                elapsed = kept[rid]
+                used.add(rid)
+                carried += 1
+            else:
+                for cand in kept_by_name.get(row["name"], []):
+                    if cand not in used:
+                        elapsed = kept[cand]
+                        used.add(cand)
+                        carried += 1
+                        break
+            self.timers[rid] = TimerState(row["name"], elapsed=elapsed)
+        return carried
+
+    def _restore_from_snapshot(self, path: Path, mode: str = "all"):
+        """mode: 'all' (times + rows), 'times' (times only), 'rows' (layout)."""
         try:
             new_state = AppState.load(path)
         except Exception:
             log.exception(f"Failed to restore from snapshot '{path}'.")
             self.show_toast("Restore failed — current state unchanged", 5)
             return
+        # Every mode below overwrites live data, so bank what's here first.
+        self._try_snapshot(reason="pre_restore", priority="high")
         self._stop_all()
-        self._state = new_state
-        self._next_rowid = max(
-            (r["rowid"] for r in self._state.rows), default=-1) + 1
-        self.timers = {}
-        for row in self._state.rows:
-            if row["type"] == "timer":
+
+        if mode == "times":
+            n = self._restore_times_only(new_state)
+            summary = (f"Restored times for {n} client{'' if n == 1 else 's'}"
+                       if n else "No matching clients — nothing restored")
+        elif mode == "rows":
+            n = self._restore_rows_only(new_state)
+            summary = (f"Restored rows, kept {n} live time"
+                       f"{'' if n == 1 else 's'}")
+        else:
+            self._state = new_state
+            self.timers = {}
+            for row in self._timer_rows(self._state.rows):
                 rid = row["rowid"]
                 tt  = self._state.tracked_times.get(str(rid), {})
                 # Don't restore running_since — timers start stopped after restore
-                self.timers[rid] = TimerState(row["name"], elapsed=tt.get("elapsed", 0.0))
+                self.timers[rid] = TimerState(row["name"],
+                                              elapsed=tt.get("elapsed", 0.0))
+            summary = "Restored times and rows"
+
+        self._next_rowid = max(
+            (r["rowid"] for r in self._state.rows), default=-1) + 1
         self._state.save(self.timers)
         self._apply_style()
         self._rebuild_rows()
@@ -1263,7 +1348,7 @@ class MainWindow(QMainWindow):
             time_str = f"{y}-{mo}-{d} {h}:{mi}:{s}"
         else:
             time_str = path.stem
-        self.show_toast(f"Restored from backup ({time_str})", 5)
+        self.show_toast(f"{summary} ({time_str})", 5)
 
     # ------------------------------------------------------------------ #
     #  Timer control                                                       #
