@@ -55,6 +55,10 @@ class DragController:
             self.hidden_rids = None
 
         self.visible_rids = set(h._visible_rowids)
+        # For undo. A reorder can't change any elapsed time, so keeping the
+        # whole list is safe here in a way a full-state rollback is not.
+        self._rows_before     = [dict(r) for r in h._state.rows]
+        self._collapsed_before = set(h._state.collapsed_groups)
 
         h.setFixedSize(h.size())
         QApplication.setOverrideCursor(Qt.ClosedHandCursor)
@@ -88,6 +92,16 @@ class DragController:
                         if cid in visible_snapshot:
                             h._state.collapsed_groups.discard(row["rowid"])
                             break
+
+        # Only worth an undo entry if the drag actually moved something.
+        before = getattr(self, "_rows_before", None)
+        self._rows_before = None
+        if before is not None:
+            order_now = [r["rowid"] for r in h._state.rows]
+            if order_now != [r["rowid"] for r in before]:
+                from ct.core.undo import ReorderRows
+                h._undo.push(ReorderRows("that reorder", before,
+                                         self._collapsed_before))
 
         h._save_state()
         h._try_snapshot(reason="layout_change", priority="medium")

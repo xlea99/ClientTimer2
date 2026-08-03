@@ -6,15 +6,17 @@ import sys
 from pathlib import Path
 from datetime import datetime, timedelta
 from PySide6.QtCore import Qt, QEvent, QTimer, QPropertyAnimation, QEasingCurve
-from PySide6.QtGui import QColor, QFont, QFontDatabase, QIcon
+from PySide6.QtGui import QColor, QFont, QFontDatabase, QIcon, QKeySequence
 from PySide6.QtWidgets import (
     QApplication,
     QColorDialog,
     QDialog,
     QFrame,
     QGraphicsOpacityEffect,
+    QHBoxLayout,
     QInputDialog,
     QLabel,
+    QLineEdit,
     QMainWindow,
     QMenu,
     QMessageBox,
@@ -28,6 +30,8 @@ from ct.common.setup import PATHS
 from ct.core.config import AppState, save_completed_session
 from ct.core.snapshot import create_snapshot, prune_snapshots
 from ct.core.timer_state import TimerState
+from ct.core.undo import (DeleteRow, RenameRow, ReorderRows, ResetTimes,
+                          UndoStack)
 from ct.ui.dialogs import ConfigDialog
 from ct.ui.drag import DragController
 from ct.ui.theme import THEMES, SIZES, build_stylesheet, build_menu_stylesheet
@@ -48,9 +52,23 @@ _SANITIZE = re.compile(r"[\x00-\x1f\x7f-\x9f]+")
 _WM_ENTERSIZEMOVE = 0x0231
 _WM_EXITSIZEMOVE  = 0x0232
 
+# Maximize arrives as a system command — from the title-bar button, from
+# double-clicking the title bar, and from Win+Up. Intercepting it here is what
+# lets the button mean "as tall as this screen allows" instead of handing the
+# window to Windows' maximize state, which this app's own sizing then has to
+# fight. The low four bits of wParam are reserved by Windows, hence the mask.
+_WM_SYSCOMMAND = 0x0112
+_SC_MAXIMIZE   = 0xF030
+_SC_MASK       = 0xFFF0
+
 # Strips the client separator rule out of a row's stylesheet. Group headers
 # use a full "border:" box, not "border-bottom:", so they are left alone.
 _BORDER_BOTTOM = re.compile(r"border-bottom\s*:[^;]*;")
+
+# Width reserved for the toast's dismiss button. A constant rather than a
+# measurement because show_toast subtracts it from the available width before
+# the button has ever been laid out.
+_TOAST_CLOSE_W = 18
 
 
 
@@ -94,6 +112,7 @@ class MainWindow(QMainWindow):
         self._shift_held   = False
         self._rearranging  = False
         self._visible_rowids = []  # populated by _rebuild_rows
+        self._undo         = UndoStack()
 
         # -- Drag controller --
         self._drag = DragController(self)
@@ -115,6 +134,9 @@ class MainWindow(QMainWindow):
         self._main_lay.setContentsMargins(0, 0, 0, 0)
 
         self._time_labels    = {}    # time QLabel -> rowid, for click-to-copy
+        self._name_labels    = {}    # name QLabel -> rowid, for dbl-click rename
+        self._inline_editor  = None  # (QLineEdit, rowid) while renaming in place
+        self._last_chrome    = None  # non-viewport height, set by _shrink_to_fit
         self._scroll_area    = None  # the row viewport, rebuilt with the grid
         self._hidden_line    = None  # (row widget, original css, stripped css)
         self._expected_size  = None  # last size we asked for ourselves
@@ -135,12 +157,29 @@ class MainWindow(QMainWindow):
         toast_lay.setContentsMargins(0, 0, 0, 0)
         toast_lay.setSpacing(0)
 
+        # One coloured bar holding [X][message], so the dismiss button sits
+        # inside the toast rather than floating beside it.
+        self._toast_bar = QWidget()
+        self._toast_bar.setObjectName("toastBar")
+        bar_lay = QHBoxLayout(self._toast_bar)
+        bar_lay.setContentsMargins(0, 0, 0, 0)
+        bar_lay.setSpacing(0)
+
+        self._toast_close = QPushButton("✕")
+        self._toast_close.setFont(QFont("Calibri", 9))
+        self._toast_close.setFixedWidth(_TOAST_CLOSE_W)
+        self._toast_close.setCursor(Qt.PointingHandCursor)
+        self._toast_close.setToolTip("Dismiss")
+        self._toast_close.clicked.connect(self._dismiss_toast)
+        bar_lay.addWidget(self._toast_close)
+
         self._toast = QLabel()
         self._toast.setAlignment(Qt.AlignCenter)
         self._toast.setFont(QFont("Calibri", 9))
         self._toast.setContentsMargins(4, 2, 4, 2)
         self._toast.setWordWrap(True)
-        toast_lay.addWidget(self._toast)
+        bar_lay.addWidget(self._toast, 1)
+        toast_lay.addWidget(self._toast_bar)
 
         self._toast_opacity = QGraphicsOpacityEffect(self._toast_container)
         self._toast_container.setGraphicsEffect(self._toast_opacity)
@@ -420,6 +459,9 @@ class MainWindow(QMainWindow):
         """Tear down and recreate the entire grid: client rows + footer."""
         self._widgets.clear()
         self._time_labels = {}   # time QLabel -> rowid, for click-to-copy
+        self._name_labels = {}   # name QLabel -> rowid, for dbl-click rename
+        # The editor lived in the tree about to be replaced.
+        self._inline_editor = None
 
         # Build the entire new content (row grid + footer) fully offline as
         # ONE widget tree, then swap it into the window in a single adjacent
@@ -550,17 +592,27 @@ class MainWindow(QMainWindow):
                     row_container.setCursor(Qt.OpenHandCursor)
                     for child in row_container.findChildren(QPushButton):
                         child.setCursor(Qt.ArrowCursor)
-                elif not widget_dict.get("is_group"):
-                    # Click the time to copy it. Undo the blanket
-                    # transparent-for-mouse above for this one label so it can
-                    # hover and be clicked; in rearrange mode it stays
-                    # transparent so dragging by the time still works.
-                    tlbl = widget_dict.get("time")
-                    if tlbl is not None:
-                        tlbl.setAttribute(Qt.WA_TransparentForMouseEvents, False)
-                        tlbl.installEventFilter(self)
-                        tlbl.setCursor(Qt.PointingHandCursor)
-                        self._time_labels[tlbl] = rid
+                else:
+                    # These two labels undo the blanket transparent-for-mouse
+                    # above so they can be hovered and clicked in their own
+                    # right. In rearrange mode they stay transparent, so
+                    # dragging a row by its name or time still works.
+
+                    # Double-click the name to rename — rows and groups both.
+                    nlbl = widget_dict.get("name")
+                    if nlbl is not None:
+                        nlbl.setAttribute(Qt.WA_TransparentForMouseEvents, False)
+                        nlbl.installEventFilter(self)
+                        self._name_labels[nlbl] = rid
+
+                    # Click the time to copy it.
+                    if not widget_dict.get("is_group"):
+                        tlbl = widget_dict.get("time")
+                        if tlbl is not None:
+                            tlbl.setAttribute(Qt.WA_TransparentForMouseEvents, False)
+                            tlbl.installEventFilter(self)
+                            tlbl.setCursor(Qt.PointingHandCursor)
+                            self._time_labels[tlbl] = rid
 
                 row_containers.append(row_container)
                 self._grid.addWidget(row_container)
@@ -666,7 +718,62 @@ class MainWindow(QMainWindow):
             w["stop"].setText("Stop")
             w["x"].setText("0" if sh else "X")
 
+    # ------------------------------------------------------------------ #
+    #  Undo                                                                #
+    # ------------------------------------------------------------------ #
+
+    def _undo_last(self):
+        cmd = self._undo.peek()
+        if cmd is None:
+            self.show_toast("Nothing to undo", 3)
+            return
+        mode = "revert"
+        conflicts = cmd.conflicts(self.timers)
+        if conflicts:
+            mode = self._ask_undo_mode(conflicts)
+            if mode is None:
+                return             # cancelled — leave it on the stack
+        self._undo.pop()
+        # Bank the current state first: undo is itself a change, and the
+        # snapshot history should be able to get back past it.
+        self._try_snapshot(reason="pre_undo", priority="medium")
+        cmd.undo(self._state, self.timers, mode)
+        self._save_state()
+        self._rebuild_rows()
+        self._shrink_to_fit()
+        self.show_toast(f"Undid {cmd.label}", 4)
+
+    def _ask_undo_mode(self, conflicts):
+        """Ask what to do with time accrued since a reset. None == cancel."""
+        listing = "\n".join(f"    {name} — {format_time(secs)}"
+                            for name, secs in conflicts)
+        box = QMessageBox(self)
+        box.setIcon(QMessageBox.Question)
+        box.setWindowTitle("Undo Reset")
+        box.setText("These timers have accumulated time since being reset:")
+        box.setInformativeText(
+            f"{listing}\n\n"
+            "Add that time on top of the restored values, or revert them to "
+            "exactly what they were before the reset?")
+        add_btn    = box.addButton("Add Time", QMessageBox.AcceptRole)
+        revert_btn = box.addButton("Revert Exactly", QMessageBox.DestructiveRole)
+        box.addButton("Cancel", QMessageBox.RejectRole)
+        box.setDefaultButton(add_btn)
+        box.exec()
+        clicked = box.clickedButton()
+        if clicked is add_btn:
+            return "add"
+        if clicked is revert_btn:
+            return "revert"
+        return None
+
     def keyPressEvent(self, event):
+        # Handled here rather than as a QShortcut on purpose: a focused
+        # QLineEdit (the inline rename editor) consumes Ctrl+Z for its own
+        # undo before it ever reaches the window, which is what you want.
+        if event.matches(QKeySequence.Undo):
+            self._undo_last()
+            return
         if event.key() == Qt.Key_Shift and not event.isAutoRepeat():
             self._shift_held = True
             self._update_shift_labels()
@@ -693,6 +800,17 @@ class MainWindow(QMainWindow):
     # ------------------------------------------------------------------ #
 
     def eventFilter(self, obj, event):
+        # An open inline editor owns its own keys and focus, unconditionally.
+        if self._inline_editor is not None and obj is self._inline_editor[0]:
+            if (event.type() == QEvent.KeyPress
+                    and event.key() == Qt.Key_Escape):
+                self._end_inline_rename(commit=False)
+                return True
+            if event.type() == QEvent.FocusOut:
+                # Clicking away saves, same as pressing Enter.
+                self._end_inline_rename(commit=True)
+                return False
+
         if self._drag.active:
             return self._drag.handle_event(obj, event)
 
@@ -720,6 +838,20 @@ class MainWindow(QMainWindow):
             elif (event.type() == QEvent.MouseButtonPress
                   and event.button() == Qt.LeftButton):
                 self._on_status_click()
+                return True
+
+        # The name label is its own target: double-click renames. It still has
+        # to drive the row's hover underline, because entering it sends Leave
+        # to the container.
+        name_rid = self._name_labels.get(obj)
+        if name_rid is not None:
+            if event.type() == QEvent.Enter:
+                self._on_row_hover(name_rid, True)
+            elif event.type() == QEvent.Leave:
+                self._on_row_hover(name_rid, False)
+            elif (event.type() == QEvent.MouseButtonDblClick
+                  and event.button() == Qt.LeftButton):
+                self._begin_inline_rename(name_rid)
                 return True
 
         # The time label is its own hover/click target inside the row.
@@ -776,6 +908,24 @@ class MainWindow(QMainWindow):
         self._update_parent_group_time(rowid)
         self._save_state()
         self._update_status()
+
+    def _push_delete_undo(self, rowid):
+        """Record everything needed to put a row back. Call before removing.
+
+        Returns the row's name so the caller can name it in a toast.
+        """
+        row = next((r for r in self._state.rows if r["rowid"] == rowid), None)
+        if row is None:
+            return None
+        ts = self.timers.get(rowid)
+        self._undo.push(DeleteRow(
+            f"the deletion of '{row['name']}'",
+            row=dict(row),
+            index=self._state.rows.index(row),
+            elapsed=ts.current_elapsed if ts is not None else 0.0,
+            was_collapsed=rowid in self._state.collapsed_groups,
+        ))
+        return row["name"]
 
     def _on_add(self):
         raw  = self._add_input.text().strip()
@@ -842,12 +992,14 @@ class MainWindow(QMainWindow):
             (r["name"] for r in self._state.rows if r["rowid"] == rowid), "")
         if not self._confirm_delete(f"Delete group '{name}'?"):
             return
+        self._push_delete_undo(rowid)
         self._state.collapsed_groups.discard(rowid)
         self._state.rows = [r for r in self._state.rows if r["rowid"] != rowid]
         self._save_state()
         self._try_snapshot(reason="layout_change", priority="medium")
         self._rebuild_rows()
         self._shrink_to_fit()
+        self.show_toast(f"Deleted group '{name}' — Ctrl+Z to undo", 5)
 
     def _on_group_toggle(self, rowid):
         if rowid in self._state.collapsed_groups:
@@ -866,6 +1018,7 @@ class MainWindow(QMainWindow):
                 (r["name"] for r in self._state.rows if r["rowid"] == rowid), "")
             if not self._confirm_delete(f"Delete '{name}'?"):
                 return
+            self._push_delete_undo(rowid)
             self.timers[rowid].stop()
             del self.timers[rowid]
             self._state.rows = [r for r in self._state.rows if r["rowid"] != rowid]
@@ -873,6 +1026,7 @@ class MainWindow(QMainWindow):
             self._try_snapshot(reason="layout_change", priority="medium")
             self._rebuild_rows()
             self._shrink_to_fit()
+            self.show_toast(f"Deleted '{name}' — Ctrl+Z to undo", 5)
 
     def _on_rearrange_toggle(self):
         self._rearranging = not self._rearranging
@@ -1037,6 +1191,77 @@ class MainWindow(QMainWindow):
         QApplication.clipboard().setText(time_str)
         self.show_toast(f"Time for {ts.name} ({time_str}) copied to clipboard", 4)
 
+    def _begin_inline_rename(self, rowid):
+        """Edit a row's name in place — the label becomes a text box.
+
+        The editor is an OVERLAY on top of the label, not a swap for it: the
+        label stays in the layout, so the row's geometry cannot shift. Every
+        row being exactly one height is what the window's row-snapping rests
+        on, and a widget swap here would put that at risk for a cosmetic win.
+        """
+        self._end_inline_rename(commit=False)      # only one open at a time
+        w = self._widgets.get(rowid) or {}
+        lbl, container = w.get("name"), w.get("container")
+        if lbl is None or container is None:
+            return
+        t = THEMES.get(self._state.settings.theme, THEMES["E-Ink (Default)"])
+
+        editor = QLineEdit(lbl.text(), container)
+        font = QFont(lbl.font())
+        font.setUnderline(False)      # the hover underline shouldn't carry in
+        editor.setFont(font)
+        editor.setAlignment(lbl.alignment())
+        editor.setMaxLength(120)
+        editor.setStyleSheet(
+            f"QLineEdit {{ color: {t['control_fg']};"
+            f" background-color: {t['control_bg']};"
+            # Always a visible edge, even on themes whose control_border_px is
+            # 0 — an open editor has to read as one.
+            f" border: 1px solid {t['control_line']};"
+            f" padding: 0px 1px; }}")
+        editor.setGeometry(lbl.geometry())
+        editor.installEventFilter(self)
+        editor.returnPressed.connect(
+            lambda: self._end_inline_rename(commit=True))
+        editor.show()
+        editor.setFocus(Qt.OtherFocusReason)
+        editor.selectAll()
+        self._inline_editor = (editor, rowid)
+
+    def _end_inline_rename(self, commit):
+        # Cleared FIRST: tearing the editor down fires its own focus-out,
+        # which lands back here and must find nothing to do.
+        state, self._inline_editor = self._inline_editor, None
+        if state is None:
+            return
+        editor, rowid = state
+        try:
+            text = editor.text()
+        except RuntimeError:
+            return                     # editor died with a rebuild
+        editor.removeEventFilter(self)
+        editor.hide()
+        editor.deleteLater()
+        if commit:
+            self._apply_rename(rowid, text)
+
+    def _apply_rename(self, rowid, text):
+        row = next((r for r in self._state.rows if r["rowid"] == rowid), None)
+        if row is None:
+            return
+        new_name = _SANITIZE.sub("", text).strip()
+        if not new_name or new_name == row["name"]:
+            return
+        self._undo.push(RenameRow(
+            f"renaming '{row['name']}'", rowid, row["name"]))
+        row["name"] = new_name
+        if row["type"] == "timer" and rowid in self.timers:
+            self.timers[rowid].name = new_name
+        self._save_state()
+        self._try_snapshot(reason="layout_change", priority="medium")
+        self._rebuild_rows()
+        self._shrink_to_fit()
+
     def _on_row_context_menu(self, rowid, global_pos):
         row = next((r for r in self._state.rows if r["rowid"] == rowid), None)
         if row is None:
@@ -1094,17 +1319,7 @@ class MainWindow(QMainWindow):
             return
 
         if action == rename_action:
-            text, ok = QInputDialog.getText(
-                self, "Rename", "New name:", text=row["name"])
-            if ok and text.strip():
-                new_name = _SANITIZE.sub("", text).strip()
-                if new_name:
-                    row["name"] = new_name
-                    if is_timer and rowid in self.timers:
-                        self.timers[rowid].name = new_name
-                    self._save_state()
-                    self._try_snapshot(reason="layout_change", priority="medium")
-                    self._rebuild_rows()
+            self._begin_inline_rename(rowid)
         elif action == set_color:
             current_bg = row.get("bg")
             initial    = QColor(current_bg) if current_bg else QColor(255, 255, 255)
@@ -1150,6 +1365,7 @@ class MainWindow(QMainWindow):
         elif action == delete_action:
             if not self._confirm_delete(f"Delete '{row['name']}'?"):
                 return
+            self._push_delete_undo(rowid)
             if is_timer:
                 self.timers[rowid].stop()
                 del self.timers[rowid]
@@ -1160,6 +1376,9 @@ class MainWindow(QMainWindow):
             self._try_snapshot(reason="layout_change", priority="medium")
             self._rebuild_rows()
             self._shrink_to_fit()
+            label = "" if is_timer else "group "
+            self.show_toast(
+                f"Deleted {label}'{row['name']}' — Ctrl+Z to undo", 5)
 
     @staticmethod
     def _parse_time_input(text):
@@ -1314,6 +1533,8 @@ class MainWindow(QMainWindow):
             return
         # Every mode below overwrites live data, so bank what's here first.
         self._try_snapshot(reason="pre_restore", priority="high")
+        # Queued undo commands point at rows this is about to replace.
+        self._undo.clear()
         self._stop_all()
 
         if mode == "times":
@@ -1387,6 +1608,9 @@ class MainWindow(QMainWindow):
         # Before the wipe, not after — the snapshot has to hold the time that
         # is about to be thrown away. Same treatment a deleted row gets.
         self._try_snapshot(reason="reset_timer", priority="medium")
+        self._undo.push(ResetTimes(
+            f"the reset of '{name}'",
+            {rowid: self.timers[rowid].current_elapsed}))
         self.timers[rowid].stop()
         self.timers[rowid].reset()
         self._set_bold(rowid, False)
@@ -1394,6 +1618,7 @@ class MainWindow(QMainWindow):
         self._update_parent_group_time(rowid)
         self._save_state()
         self._update_status()
+        self.show_toast(f"Reset '{name}' — Ctrl+Z to undo", 5)
 
     def _reset_all(self):
         if not self._confirm_reset("Reset ALL times to zero?"):
@@ -1401,12 +1626,15 @@ class MainWindow(QMainWindow):
         # high priority: this is the largest data loss the app can do, so it
         # snapshots unconditionally rather than being debounced away.
         self._try_snapshot(reason="reset_all", priority="high")
+        self._undo.push(ResetTimes(
+            "the reset of all times",
+            {rid: ts.current_elapsed for rid, ts in self.timers.items()}))
         self._stop_all()
         for ts in self.timers.values():
             ts.reset()
         self._save_state()
         self._rebuild_rows()
-        self.show_toast("Reset all times to zero.")
+        self.show_toast("Reset all times to zero — Ctrl+Z to undo", 5)
 
     # ------------------------------------------------------------------ #
     #  Display helpers                                                     #
@@ -1525,7 +1753,62 @@ class MainWindow(QMainWindow):
                 self._user_resizing = False
                 self._resize_settle.stop()
                 self._on_resize_settled()
+            elif (msg.message == _WM_SYSCOMMAND
+                    and (msg.wParam & _SC_MASK) == _SC_MAXIMIZE):
+                self._maximize_height()
+                return True, 0        # swallow it — never actually maximize
         return super().nativeEvent(eventType, message)
+
+    def _maximize_height(self):
+        """What the maximize button does here: raise the height ceiling as far
+        as fits and re-fit, instead of maximizing the window.
+
+        A real maximize leaves Windows believing the window is maximized while
+        this app's own sizing immediately resizes it back down — the window
+        ends up in a state that only resolves once the user moves it.
+
+        The window grows in place: it extends downward from where it already
+        sits and never moves. So the reach is whatever room is left below it,
+        not the whole screen — sitting low on the screen means a shorter
+        window, which is the trade for the frame staying put.
+        """
+        screen = self.screen()
+        if screen is None:
+            return
+        avail = screen.availableGeometry()
+        frame = self.frameGeometry()
+        # Room from the current top edge down to the bottom of the work area.
+        usable = avail.bottom() - frame.top() + 1
+        # window_height is a CLIENT height (resize() excludes the frame), so
+        # take the decoration off before storing it. Capped at the screen's
+        # own height in case the title bar has been dragged above the top.
+        frame_h = max(0, frame.height() - self.height())
+        ceiling = min(usable, avail.height()) - frame_h
+        if ceiling <= 0:
+            return
+
+        self._state.window_height = ceiling
+        self._shrink_to_fit()
+        # Trim the ceiling down to a whole number of rows. Left at the raw
+        # screen height, a later fit would round UP into the row that only
+        # half fits and hang the window off the bottom edge.
+        #
+        # Derived arithmetically rather than by packing the rows that happen
+        # to exist: with a short list that would return the CONTENT height,
+        # and storing that as the ceiling would mean adding clients later
+        # scrolled them instead of growing the window. Every row is the same
+        # height by construction, so one pitch describes any row count.
+        heights = self._row_heights()
+        gap = self._grid.spacing()
+        if heights and self._last_chrome is not None:
+            pitch = heights[0] + gap
+            rows_that_fit = (ceiling - self._last_chrome + gap) // pitch
+            if rows_that_fit >= 1:
+                exact = self._last_chrome + rows_that_fit * pitch - gap
+                if exact != ceiling:
+                    self._state.window_height = exact
+                    self._shrink_to_fit()
+        self._save_state()
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
@@ -1539,7 +1822,9 @@ class MainWindow(QMainWindow):
         # A resize we didn't ask for is the user dragging the edge: that
         # height becomes the new ceiling. Snapping waits until they stop,
         # otherwise the window fights the mouse mid-drag.
-        self._state.window_height = event.size().height()
+        # The toast rides on top of the ceiling rather than inside it, so
+        # don't bake its height into the number being stored.
+        self._state.window_height = event.size().height() - self._toast_height()
         # While the frame is being dragged, WM_EXITSIZEMOVE is what ends the
         # gesture. The timer is only a fallback for platforms without it.
         if not self._user_resizing:
@@ -1668,8 +1953,13 @@ class MainWindow(QMainWindow):
         return (sum(heights) + self._grid.spacing() * (len(heights) - 1)
                 + m.top() + m.bottom())
 
-    def _snapped_height(self, target_h, chrome):
+    def _snapped_height(self, target_h, chrome, round_up=True):
         """Largest height <= target_h that shows only whole rows.
+
+        `round_up` takes the next whole row when more than half of it fits.
+        That's right for a ceiling the user dragged — they get the row they
+        were reaching for — but wrong when the ceiling is the screen itself,
+        since overshooting there hangs the window off the bottom edge.
 
         `chrome` (everything that isn't viewport: footer, rule, margins) is
         passed in rather than measured from live geometry. Deriving it here
@@ -1691,7 +1981,7 @@ class MainWindow(QMainWindow):
             if used + step > avail:
                 # Round to the NEAREST row rather than always trimming: if
                 # more than half of the next one fits, take the whole thing.
-                if (avail - used) * 2 > step:
+                if round_up and (avail - used) * 2 > step:
                     used += step
                 break
             used += step
@@ -1729,39 +2019,109 @@ class MainWindow(QMainWindow):
         if self._scroll_area is not None:
             # QScrollArea's own sizeHint is capped by Qt, so it under-reports
             # a long list. Measure the real grid and add the chrome around it.
-            # One definition of chrome, used for both the fit and the snap.
+            # One definition of chrome, used for both the fit and the snap —
+            # and kept for _maximize_height, so it never re-derives its own.
             chrome = (hint.height() - self._scroll_area.sizeHint().height()
                       + extra_h)
+            # A toast is additive: the window grows downward to carry it
+            # rather than the rows giving up space for it. So the ceiling
+            # governs everything EXCEPT the toast, and the toast's height is
+            # added back after snapping.
+            toast_h = self._toast_height()
+            self._last_chrome = chrome - toast_h
             want_h = self._content_height() + chrome
             ceiling = self._state.window_height
-            if ceiling > 0 and want_h > ceiling:
+            if ceiling > 0 and want_h - toast_h > ceiling:
                 # Scrollbar is about to appear — leave room so rows don't clip.
                 want_w += self._scroll_area.verticalScrollBar().sizeHint().width()
-                want_h = self._snapped_height(ceiling, chrome)
+                want_h = self._snapped_height(ceiling, self._last_chrome) + toast_h
         self._auto_resize(want_w, want_h)
 
+    def _toast_height(self):
+        """Height the visible toast adds to the window, 0 when hidden.
+
+        Not height(): show_toast fits the window in the same breath as making
+        the toast visible, before it has ever been laid out.
+
+        Not sizeHint() either. The message label word-wraps, so its hint is
+        Qt's guess at a comfortable *unwrapped* shape — for a one-line toast
+        it reads 60px when the row is 30px. The enclosing layout ignores that
+        hint and asks heightForWidth at the width the toast will really get,
+        so that is the number the window has to make room for. Trusting the
+        hint made the chrome 30px too small and the viewport handed the rows
+        a whole extra row for as long as the toast was up.
+        """
+        if not self._toast_container.isVisible():
+            return 0
+        c = self._toast_container
+        if c.hasHeightForWidth():
+            m = self._main_lay.contentsMargins()
+            width = self.centralWidget().width() - m.left() - m.right()
+            if width > 0:
+                return max(c.heightForWidth(width),
+                           c.minimumSizeHint().height())
+        return c.sizeHint().height()
+
     def show_toast(self, message, seconds=5):
-        """Show a transient notification at the bottom of the window."""
+        """Show a transient notification at the bottom of the window.
+
+        `seconds` is how long it stays up before fading; the X dismisses it
+        immediately whatever that was set to.
+        """
         # Cancel any in-flight fade so it can't hide the new toast.
-        if self._toast_fade is not None:
-            self._toast_fade.stop()
-            self._toast_fade = None
+        fade, self._toast_fade = self._toast_fade, None
+        if fade is not None:
+            fade.stop()
         t = THEMES.get(self._state.settings.theme, THEMES["E-Ink (Default)"])
         self._toast.setText(message)
+        # Colour lives on the bar so the button and the message read as one
+        # object; the label itself is transparent on top of it.
+        self._toast_bar.setStyleSheet(
+            f"#toastBar {{ background-color: {t['toast_bg']}; }}")
         self._toast.setStyleSheet(
-            f"background-color: {t['toast_bg']};"
+            f"background: transparent;"
             f" color: {t['toast_fg']};"
             f" padding: 3px 8px;")
+        self._toast_close.setStyleSheet(
+            f"QPushButton {{ background: transparent; border: none;"
+            f" padding: 0px; color: {t['toast_fg']}; }}"
+            f"QPushButton:hover {{ background-color: {t['toast_fg']};"
+            f" color: {t['toast_bg']}; }}")
         self._toast_opacity.setOpacity(1.0)
         # Cap the toast at the window's current width so long messages wrap
-        # downward instead of widening the window.
+        # downward instead of widening the window. The X takes its share.
         margins = self._main_lay.contentsMargins()
-        avail = self.centralWidget().width() - margins.left() - margins.right()
+        avail = (self.centralWidget().width() - margins.left()
+                 - margins.right() - _TOAST_CLOSE_W)
         if avail > 50:
             self._toast.setMaximumWidth(avail)
-        self._toast_container.setVisible(True)
-        self._shrink_to_fit()
+        self._set_toast_visible(True)
         self._toast_timer.start(int(seconds * 1000))
+
+    def _set_toast_visible(self, visible):
+        """Show or hide the toast without disturbing the scroll position.
+
+        The window resize and the toast's own layout land in different turns,
+        so for one pass the scroll area is the full new height with nothing
+        below it. Its range briefly shrinks, Qt clamps the position into it,
+        and when the range comes back the list is left sitting a toast-height
+        off a row boundary — permanently, since nothing re-snaps it.
+        """
+        bar = (self._scroll_area.verticalScrollBar()
+               if self._scroll_area is not None else None)
+        keep = bar.value() if bar is not None else None
+        self._toast_container.setVisible(visible)
+        self._refit_toast(keep)
+        # How far the text wraps depends on the width that fit just settled
+        # on, so the height measured a moment ago can be a few pixels out.
+        # Re-fit once the layout has caught up; it's a no-op if it agreed.
+        QTimer.singleShot(0, lambda: self._refit_toast(keep))
+
+    def _refit_toast(self, keep):
+        self._shrink_to_fit()
+        if keep is not None and self._scroll_area is not None:
+            # Clamps by itself if the list really did get shorter.
+            self._scroll_area.verticalScrollBar().setValue(keep)
 
     def _fade_toast(self):
         self._toast_fade = QPropertyAnimation(self._toast_opacity, b"opacity")
@@ -1773,10 +2133,15 @@ class MainWindow(QMainWindow):
         self._toast_fade.start()
 
     def _dismiss_toast(self):
+        # Also reachable from the X, mid-countdown — kill both the pending
+        # fade and the timer that would have started one.
+        self._toast_timer.stop()
+        fade, self._toast_fade = self._toast_fade, None
+        if fade is not None:
+            fade.stop()
         if self._toast_container.isVisible():
-            self._toast_container.setVisible(False)
             self._toast_opacity.setOpacity(1.0)
-            self._shrink_to_fit()
+            self._set_toast_visible(False)
 
     def _sync_footer_heights(self):
         # sizeHint, not height(): the edit controls live on a stacked page that
@@ -1876,6 +2241,9 @@ class MainWindow(QMainWindow):
         state = self._save_state()
         save_completed_session(state, boundary_dt)
 
+        # The session just ended and was archived. Undoing across that line
+        # would put yesterday's edits back on top of today's fresh zeroes.
+        self._undo.clear()
         self._stop_all()
         for ts in self.timers.values():
             ts.reset()
