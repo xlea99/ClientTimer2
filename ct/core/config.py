@@ -308,6 +308,14 @@ class AppState:
             "Cupertino Light":       "E-Ink (Default)",
             "E-Ink":                 "E-Ink (Default)",
             "Pretty In Pink-Mobile": "Ring Around The Rosie",
+            # Retired: Cold Transfer owns the cold-blues slot and actually
+            # pops on this app, which Nord never did.
+            "Muted Dev-Dark":        "Cold Transfer",
+            # Two swings at the same 80s vibe; Trapper Keeper is the one that
+            # landed. Neither shipped, but they were live here long enough to
+            # be selected, and a missing theme falls back to the default.
+            "Vapor Trunk":           "Trapper Keeper",
+            "All Skate":             "Trapper Keeper",
         }
         theme_renamed = settings.theme == "Cupertino Light"
         if settings.theme in _THEME_RENAMES:
