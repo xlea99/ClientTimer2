@@ -14,11 +14,6 @@
 # 1 for themes with hard edges. control_line is the color that width paints in
 # (and the always-on 1px edge around lists, tables and menus).
 THEMES = {
-    # Charcoal, cream and brass. The gold used to fill every Start/Stop, which
-    # put the loudest colour on the least important elements and left the
-    # running row as the eleventh gold thing on screen. Buttons now recede to
-    # charcoal with a hairline and gold survives only where it means
-    # something: hover, the running row, the running group, a band outline.
     "A Way": {
         "app_bg":            "#292929",
         "app_fg":            "#FDF7D1",

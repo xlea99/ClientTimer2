@@ -48,7 +48,12 @@ class UIBlueprint:
         col5_size = QSize(_hx, _hx)
         _ref_x.deleteLater()
 
-        start_min_w = QFontMetrics(time_font).horizontalAdvance("Start") + 20
+        # The one button cycles through all three of these, so size it to
+        # the widest or it would resize under the cursor every time a
+        # timer starts — and a row that changes width re-lays-out the grid.
+        _fm_time = QFontMetrics(time_font)
+        start_min_w = max(_fm_time.horizontalAdvance(lbl)
+                          for lbl in ("Start", "Stop", "Add")) + 20
 
         bold_label = QFont(font_family, size["label"])
         bold_label.setBold(True)

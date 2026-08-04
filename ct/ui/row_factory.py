@@ -133,8 +133,7 @@ class RowFactory:
                         label_align: LabelAlign,
                         show_adjust: bool,
                         show_x: bool,
-                        on_start: Callable[...,Any],
-                        on_stop: Callable[...,Any],
+                        on_toggle: Callable[...,Any],
                         on_adjust: Callable[...,Any],
                         on_remove: Callable[...,Any],
                         force_line_gap: bool = False,
@@ -202,27 +201,19 @@ class RowFactory:
         name_lbl.setStyleSheet(f"color: {fg};")
         rc_lay.addWidget(name_lbl)
 
-        # Col 2: Start / Stop
-        start_btn = QPushButton("Add" if shift_held else "Start")
-        start_btn.setFont(blueprint.time_font)
-        start_btn.setMinimumWidth(blueprint.start_min_w)
-        start_btn.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
-        start_btn.clicked.connect(lambda _=False: on_start(rid))
-
-        stop_btn = QPushButton("Stop")
-        stop_btn.setFont(blueprint.time_font)
-        stop_btn.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
-        stop_btn.clicked.connect(lambda _=False: on_stop(rid))
-
-        ss_container = QWidget()
-        ss_container.setObjectName("ssCt")
-        ss_container.setStyleSheet("#ssCt { background: transparent; }")
-        ss_lay = QHBoxLayout(ss_container)
-        ss_lay.setContentsMargins(0, 0, 0, 0)
-        ss_lay.setSpacing(blueprint.btn_spacing)
-        ss_lay.addWidget(start_btn)
-        ss_lay.addWidget(stop_btn)
-        rc_lay.addWidget(ss_container)
+        # Col 2: one button that starts a stopped timer and stops a running
+        # one. Stop was the rarely-used half — in the chess-clock model you
+        # switch clients by starting the next timer, not by stopping this one
+        # — and it did nothing at all on a stopped row. FIXED width, not
+        # minimum: the label changes on every start/stop, and a button that
+        # resized would shift the columns under the cursor.
+        toggle_btn = QPushButton(
+            "Stop" if state.running else ("Add" if shift_held else "Start"))
+        toggle_btn.setFont(blueprint.time_font)
+        toggle_btn.setFixedWidth(blueprint.start_min_w)
+        toggle_btn.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
+        toggle_btn.clicked.connect(lambda _=False: on_toggle(rid))
+        rc_lay.addWidget(toggle_btn)
 
         # Col 3: time
         time_lbl = QLabel(format_time(state.current_elapsed))
@@ -267,7 +258,7 @@ class RowFactory:
 
         widget_dict = {
             "name": name_lbl, "time": time_lbl,
-            "start": start_btn, "stop": stop_btn,
+            "toggle": toggle_btn,
             "minus": minus_btn, "plus": plus_btn,
             "x": x_btn, "bullet": bullet,
             "container": rc,

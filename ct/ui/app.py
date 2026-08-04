@@ -150,6 +150,14 @@ class MainWindow(QMainWindow):
         self._resize_settle.setSingleShot(True)
         self._resize_settle.setInterval(200)
         self._resize_settle.timeout.connect(self._on_resize_settled)
+        # Qt does not guarantee a Leave when the pointer exits quickly, and
+        # this window is usually not the focused one, so a missed Leave used
+        # to strand the hover tint until the user came back and hovered
+        # something else. Runs ONLY while a row is tinted, so it costs
+        # nothing the rest of the time.
+        self._hover_poll     = QTimer(self)
+        self._hover_poll.setInterval(150)
+        self._hover_poll.timeout.connect(self._sync_hover_to_cursor)
         self._grid_widget    = None  # created fresh each _rebuild_rows
         self._content_widget = None  # single swappable child: grid + footer
 
@@ -572,8 +580,7 @@ class MainWindow(QMainWindow):
                         # don't draw one are shorter and their contents sit
                         # at a different height from their neighbours'.
                         force_line_gap=ss.client_separators,
-                        on_start=self._on_start,
-                        on_stop=self._on_stop,
+                        on_toggle=self._on_toggle_timer,
                         on_adjust=self._on_adjust,
                         on_remove=self._on_remove,
                     )
@@ -730,13 +737,13 @@ class MainWindow(QMainWindow):
 
     def _update_shift_labels(self):
         sh = self._shift_held
-        for w in self._widgets.values():
+        for rid, w in self._widgets.items():
             if w.get("is_group"):
                 continue
             w["minus"].setText("-1" if sh else "-5")
             w["plus"].setText("+1" if sh else "+5")
-            w["start"].setText("Add" if sh else "Start")
-            w["stop"].setText("Stop")
+            running = rid in self.timers and self.timers[rid].running
+            w["toggle"].setText(self._toggle_label(running))
             w["x"].setText("0" if sh else "X")
 
     # ------------------------------------------------------------------ #
@@ -806,6 +813,12 @@ class MainWindow(QMainWindow):
             self._update_shift_labels()
         super().keyReleaseEvent(event)
 
+    def leaveEvent(self, event):
+        # The window itself noticed the exit — take the fast path rather than
+        # waiting up to one poll interval.
+        self._sync_hover_to_cursor()
+        super().leaveEvent(event)
+
     def changeEvent(self, event):
         if event.type() == QEvent.ActivationChange:
             if not self.isActiveWindow():
@@ -861,6 +874,9 @@ class MainWindow(QMainWindow):
                   and event.button() == Qt.LeftButton):
                 self._on_status_click()
                 return True
+            elif event.type() == QEvent.ContextMenu:
+                self._on_status_context()
+                return True
 
         # The name label is its own target: double-click renames. It still has
         # to drive the row's hover underline, because entering it sends Leave
@@ -912,6 +928,19 @@ class MainWindow(QMainWindow):
     # ------------------------------------------------------------------ #
     #  Button handlers                                                     #
     # ------------------------------------------------------------------ #
+
+    def _toggle_label(self, running):
+        """What the single Start/Stop button should read right now."""
+        if running:
+            return "Stop"                 # shift is irrelevant once running
+        return "Add" if self._shift_held else "Start"
+
+    def _on_toggle_timer(self, rowid):
+        """The one button: stop it if it runs, start it if it doesn't."""
+        if rowid in self.timers and self.timers[rowid].running:
+            self._on_stop(rowid)
+        else:
+            self._on_start(rowid)
 
     def _on_start(self, rowid):
         if QApplication.keyboardModifiers() & Qt.ShiftModifier:
@@ -1065,6 +1094,16 @@ class MainWindow(QMainWindow):
     # ------------------------------------------------------------------ #
 
     def _sync_hover_to_cursor(self):
+        """Re-derive the hover, then keep polling for as long as one is up."""
+        self._sync_hover_impl()
+        want = (self._hovered_rid is not None
+                and self._drag.dragging_rid is None)
+        if want and not self._hover_poll.isActive():
+            self._hover_poll.start()
+        elif not want and self._hover_poll.isActive():
+            self._hover_poll.stop()
+
+    def _sync_hover_impl(self):
         """Tint whichever row the pointer is actually inside.
 
         Enter/Leave can't express this on their own:
@@ -1310,11 +1349,23 @@ class MainWindow(QMainWindow):
         self._status_lbl.setFont(f)
 
     def _on_status_click(self):
-        """Nothing running: copy the session. Running: go to it."""
+        """Copy every time, whatever is running.
+
+        Copying used to be reachable only when nothing was running, because
+        the click did double duty as jump-to-the-running-row. But the times
+        you most want on the clipboard are the ones still accruing, and
+        _copy_session already reports current_elapsed, so a running timer
+        copies as it reads right now. Jump moved to right-click, which is
+        where every other secondary action in this app lives.
+        """
+        self._copy_session()
+
+    def _on_status_context(self):
+        """Right-click the status line: go to whatever is running."""
         running = self._running_rids()
         if not running:
-            self._copy_session()
-        elif len(running) == 1:
+            return
+        if len(running) == 1:
             self._scroll_to_row(running[0])
         else:
             # More than one and no unambiguous target, so ask. Same menu
@@ -1364,7 +1415,7 @@ class MainWindow(QMainWindow):
         QApplication.clipboard().setText("\n".join(lines))
         self.show_toast(
             f"{len(lines)} client time{'s' if len(lines) > 1 else ''} "
-            f"copied to clipboard", 4)
+            f"copied to clipboard", 2.5)
 
     def _copy_timer_time(self, rid):
         """Copy a live timer's current time to the clipboard, and toast it."""
@@ -1373,7 +1424,8 @@ class MainWindow(QMainWindow):
         ts = self.timers[rid]
         time_str = format_time(ts.current_elapsed)
         QApplication.clipboard().setText(time_str)
-        self.show_toast(f"Time for {ts.name} ({time_str}) copied to clipboard", 4)
+        self.show_toast(f"Time for {ts.name} ({time_str}) copied to clipboard",
+                        2.5)
 
     def _begin_inline_rename(self, rowid):
         """Edit a row's name in place — the label becomes a text box.
@@ -1846,6 +1898,12 @@ class MainWindow(QMainWindow):
         if b is not None:
             b.setText("\u2022" if bold else "")
             b.setStyleSheet(f"color: {color};")
+
+        # `bold` IS the running state, and this runs on every start and stop,
+        # so it is the one place the single button's label has to follow.
+        tgl = w.get("toggle")
+        if tgl is not None:
+            tgl.setText(self._toggle_label(bold))
 
         parent = self._parent_group(rowid)
         if parent is not None:
