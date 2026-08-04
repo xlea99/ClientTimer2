@@ -6,7 +6,8 @@ import sys
 from pathlib import Path
 from datetime import datetime, timedelta
 from PySide6.QtCore import Qt, QEvent, QTimer, QPropertyAnimation, QEasingCurve
-from PySide6.QtGui import QColor, QFont, QFontDatabase, QIcon, QKeySequence
+from PySide6.QtGui import (QColor, QCursor, QFont, QFontDatabase, QIcon,
+                           QKeySequence)
 from PySide6.QtWidgets import (
     QApplication,
     QColorDialog,
@@ -63,7 +64,6 @@ _SC_MASK       = 0xFFF0
 
 # Strips the client separator rule out of a row's stylesheet. Group headers
 # use a full "border:" box, not "border-bottom:", so they are left alone.
-_BORDER_BOTTOM = re.compile(r"border-bottom\s*:[^;]*;")
 
 # Width reserved for the toast's dismiss button. A constant rather than a
 # measurement because show_toast subtracts it from the available width before
@@ -135,10 +135,13 @@ class MainWindow(QMainWindow):
 
         self._time_labels    = {}    # time QLabel -> rowid, for click-to-copy
         self._name_labels    = {}    # name QLabel -> rowid, for dbl-click rename
+        self._row_children   = {}    # any row sub-widget -> rowid, for hover
+        self._hovered_rid    = None  # row the pointer is actually inside
         self._inline_editor  = None  # (QLineEdit, rowid) while renaming in place
         self._last_chrome    = None  # non-viewport height, set by _shrink_to_fit
         self._scroll_area    = None  # the row viewport, rebuilt with the grid
-        self._hidden_line    = None  # (row widget, original css, stripped css)
+        self._hidden_line    = None  # row whose separator is currently hidden
+        self._hover_strip    = None  # fills the gap above the hovered row
         self._expected_size  = None  # last size we asked for ourselves
         self._programmatic_resize = False
         self._user_resizing  = False  # true between ENTER/EXITSIZEMOVE
@@ -460,6 +463,7 @@ class MainWindow(QMainWindow):
         self._widgets.clear()
         self._time_labels = {}   # time QLabel -> rowid, for click-to-copy
         self._name_labels = {}   # name QLabel -> rowid, for dbl-click rename
+        self._row_children = {}  # sub-widget -> rowid, for hover tracking
         # The editor lived in the tree about to be replaced.
         self._inline_editor = None
 
@@ -586,6 +590,11 @@ class MainWindow(QMainWindow):
                 )
                 for child in row_container.findChildren(QPushButton):
                     child.setContextMenuPolicy(Qt.PreventContextMenu)
+                    # A button is a child, so entering it sends Leave to the
+                    # container. Track them too or the row un-tints the moment
+                    # the pointer crosses onto Start.
+                    child.installEventFilter(self)
+                    self._row_children[child] = rid
                 for child in row_container.findChildren(QLabel):
                     child.setAttribute(Qt.WA_TransparentForMouseEvents)
                 if self._rearranging:
@@ -691,6 +700,11 @@ class MainWindow(QMainWindow):
         old_content = self._content_widget
         self._content_widget = content
         if old_content is not None:
+            # The hover strip lives inside the old tree and dies with it.
+            # Drop the reference here rather than letting the next hover
+            # discover the corpse.
+            self._hover_strip = None
+            self._hovered_rid = None
             self._main_lay.removeWidget(old_content)
             old_content.setParent(None)
             old_content.deleteLater()
@@ -700,8 +714,15 @@ class MainWindow(QMainWindow):
         # event-loop turn, and until then QLayout skips it when measuring, so
         # the window's size hint reads 0x0.
         content.setVisible(True)
+        # The strip was destroyed with the old tree; a live drag still wants
+        # one. Must come after the swap so the new containers have geometry.
+        self._sync_drag_strip()
 
         QTimer.singleShot(0, self._sync_footer_heights)
+        # Deferred so the new rows have geometry to hit-test against. This is
+        # what re-tints the row under a stationary pointer after a drag ends.
+        QTimer.singleShot(0, self._sync_hover_to_cursor)
+        self._schedule_bottom_line()
 
     # ------------------------------------------------------------------ #
     #  Shift-key visual feedback                                           #
@@ -827,6 +848,7 @@ class MainWindow(QMainWindow):
             # and can push a running timer out of view.
             if event.type() == QEvent.Resize:
                 self._update_bottom_line()
+                self._schedule_bottom_line()
                 self._update_status()
 
         # The footer status line is a click target too.
@@ -866,14 +888,17 @@ class MainWindow(QMainWindow):
                 self._copy_timer_time(time_rid)
                 return True
 
-        if event.type() == QEvent.Enter:
-            rid = self._drag.rid_for_container(obj)
-            if rid is not None:
-                self._on_row_hover(rid, True)
-        elif event.type() == QEvent.Leave:
-            rid = self._drag.rid_for_container(obj)
-            if rid is not None:
-                self._on_row_hover(rid, False)
+        if event.type() in (QEvent.Enter, QEvent.Leave):
+            # Any crossing in or out of a row or one of its children is a
+            # reason to re-ask where the pointer is; the answer, not the
+            # event, decides which row is tinted.
+            if (obj in self._row_children
+                    or obj in self._name_labels
+                    or obj in self._time_labels
+                    or self._drag.rid_for_container(obj) is not None
+                    or (self._scroll_area is not None
+                        and obj is self._scroll_area.viewport())):
+                self._sync_hover_to_cursor()
 
         if self._rearranging and event.type() == QEvent.MouseButtonPress:
             if event.button() == Qt.LeftButton:
@@ -1039,6 +1064,52 @@ class MainWindow(QMainWindow):
     #  Hover and context menu                                              #
     # ------------------------------------------------------------------ #
 
+    def _sync_hover_to_cursor(self):
+        """Tint whichever row the pointer is actually inside.
+
+        Enter/Leave can't express this on their own:
+
+        * Entering a CHILD sends Leave to the row container, so the row
+          un-tints the moment the pointer crosses onto a Start button — even
+          though it is plainly still inside the row.
+        * A rebuild swaps in fresh containers under a stationary pointer and
+          never generates an Enter for the new one, so after a drag ends the
+          row under the mouse comes back untinted until you move.
+
+        Both go away once the tint is derived from the cursor position rather
+        than from the last crossing event.
+        """
+        if self._drag.dragging_rid is not None:
+            return                       # a drag owns the tint and the strip
+        pos = QCursor.pos()
+        target = None
+        if self._scroll_area is not None:
+            vp = self._scroll_area.viewport()
+            # Rows scrolled out of view still have geometry; the viewport
+            # test keeps the pointer from "hovering" one of them.
+            if vp.rect().contains(vp.mapFromGlobal(pos)):
+                for rid, w in self._widgets.items():
+                    rc = w.get("container")
+                    if rc is None:
+                        continue
+                    try:
+                        if (rc.isVisible()
+                                and rc.rect().contains(rc.mapFromGlobal(pos))):
+                            target = rid
+                            break
+                    except RuntimeError:
+                        continue         # container died with a rebuild
+        if target == self._hovered_rid:
+            if target is not None:
+                # Same row, but a rebuild may have moved it — re-place.
+                self._on_row_hover(target, True)
+            return
+        prev, self._hovered_rid = self._hovered_rid, target
+        if prev is not None:
+            self._on_row_hover(prev, False)
+        if target is not None:
+            self._on_row_hover(target, True)
+
     def _on_row_hover(self, rid, entering):
         """Tint the whole row rather than underlining its name.
 
@@ -1056,9 +1127,108 @@ class MainWindow(QMainWindow):
         rc = w.get("container")
         if rc is None:
             return
+        if self._drag.dragging_rid is not None:
+            # A drag owns the strip; don't let a stray Enter steal it.
+            return
         rc.setProperty("hov", "1" if entering else "")
         rc.style().unpolish(rc)
         rc.style().polish(rc)
+        # Group headers are a bordered box, not an open row — running their
+        # fill up into the gap reads as a tab sticking out of the top of it.
+        # Passing None also clears a strip left over from the row before.
+        fill = (entering and not w.get("is_group"))
+        self._place_hover_strip(rc, w.get("bg_left", 0) if fill else None)
+
+    def _sync_drag_strip(self):
+        """Extend the dragged row's fill into the gap above it too.
+
+        The drag colour is painted by the row's own #rowBg rule (row_factory
+        picks row_drag_bg when is_dragging), so it stops at the row's rect
+        exactly like the hover tint used to — and a rebuild clears the strip.
+        Re-place it after every rebuild while a drag is live.
+        """
+        rid = self._drag.dragging_rid
+        if rid is None or rid not in self._widgets:
+            return
+        # The strip is positioned from the row's laid-out y(), and callers
+        # reach here at different points in the layout cycle — _rebuild_rows
+        # right after swapping the tree in, before Qt has assigned geometry.
+        # Reading a stale y() puts the fill on the row's previous position.
+        self._grid.activate()
+        w = self._widgets[rid]
+        if w.get("is_group"):
+            # Same reason as hover: a bordered header doesn't take the fill.
+            self._place_hover_strip(None, None)
+            return
+        rc = w.get("container")
+        if rc is not None:
+            t = THEMES.get(self._state.settings.theme, THEMES["E-Ink (Default)"])
+            self._place_hover_strip(rc, w.get("bg_left", 0), t["row_drag_bg"])
+
+    def _live_strip(self):
+        """The hover strip, or None once Qt has destroyed it.
+
+        Every rebuild swaps in a fresh content tree and deletes the old one,
+        taking the strip with it — but the Python wrapper survives, so the
+        attribute is not None and ANY call on it raises RuntimeError. That
+        includes the parentWidget() call used to notice the swap, which is
+        how this first showed up: unlock, hover, stack trace per mouse move.
+        _rebuild_rows clears the attribute so this is normally moot; the
+        guard covers deletions from anywhere else (a close, a deleteLater).
+        """
+        strip = self._hover_strip
+        if strip is None:
+            return None
+        try:
+            strip.parentWidget()
+        except RuntimeError:
+            self._hover_strip = None
+            return None
+        return strip
+
+    def _place_hover_strip(self, rc, bg_left, color=None):
+        """Fill the layout gap ABOVE a hovered row so the tint reads as the
+        whole row, flush with the separator above it.
+
+        A widget cannot paint outside its own rect — a negative margin-top is
+        clipped away (and moves the box out of its own clip, so the row loses
+        its fill entirely). Growing the rows by v_spacing and zeroing the grid
+        spacing would work, but that is the row-pitch arithmetic the whole
+        window-snapping model rests on, for four pixels of polish.
+
+        So: one reusable strip, positioned in the gap. It is parented INSIDE
+        the scrolled content, so it scrolls with the rows for free and needs
+        no handling on scroll.
+        """
+        strip = self._live_strip()
+        if bg_left is None:
+            if strip is not None:
+                strip.hide()
+            return
+        gap = self._grid.spacing()
+        parent = rc.parentWidget()
+        if gap <= 0 or parent is None or rc.y() < gap:
+            # No gap, or this is the top row and there is nothing above it.
+            if strip is not None:
+                strip.hide()
+            return
+        # A strip left over from a previous content tree belongs to a dead
+        # parent — build a fresh one.
+        if strip is None or strip.parentWidget() is not parent:
+            strip = QWidget(parent)
+            strip.setObjectName("hoverStrip")
+            strip.setAttribute(Qt.WA_TransparentForMouseEvents)
+            self._hover_strip = strip
+        if color is None:
+            t = THEMES.get(self._state.settings.theme,
+                           THEMES["E-Ink (Default)"])
+            color = t["row_hover_bg"]
+        strip.setStyleSheet(
+            f"#hoverStrip {{ background-color: {color}; }}")
+        strip.setGeometry(rc.x() + bg_left, rc.y() - gap,
+                          max(0, rc.width() - bg_left), gap)
+        strip.raise_()
+        strip.show()
 
     def _on_time_hover(self, rid, entering):
         """The time is a click target nested inside an already-tinted row.
@@ -1070,7 +1240,7 @@ class MainWindow(QMainWindow):
         """
         if rid not in self._widgets:
             return
-        self._on_row_hover(rid, entering)
+        self._sync_hover_to_cursor()
         lbl = self._widgets[rid].get("time")
         if lbl is not None:
             f = lbl.font()
@@ -1911,6 +2081,18 @@ class MainWindow(QMainWindow):
         target = max(0, min(len(offsets) - 1, idx + rows))
         bar.setValue(min(offsets[target], bar.maximum()))
 
+    def _schedule_bottom_line(self):
+        """Re-pick the bottom row once the layout has actually settled.
+
+        _update_bottom_line hit-tests real widget positions, but its callers
+        run mid-fit: during startup the rows still carry the PREVIOUS pitch
+        (invalidate/activate re-lays-out from cached hints and can't fix
+        that), so it matched a row one place too high and hid the wrong
+        separator with nothing to correct it. Re-running on the next
+        event-loop turn is the only point where the geometry is real.
+        """
+        QTimer.singleShot(0, self._update_bottom_line)
+
     def _update_bottom_line(self):
         """Drop the client separator under the bottom-most visible row.
 
@@ -1922,21 +2104,35 @@ class MainWindow(QMainWindow):
 
         Only the painted border is removed; the row keeps its reserved gap,
         so no geometry moves and the uniform row pitch is untouched.
+
+        Driven by a dynamic property, NOT by rewriting the stylesheet. The
+        old version stripped the declaration, stored the exact string it had
+        replaced, and restored only on an exact match so it couldn't clobber
+        a rewrite from elsewhere. But a rewrite in between (a drag reorder
+        rewrites every row's) made that guard fail silently: the restore was
+        skipped, the reference was dropped, and the row kept a border that
+        nothing would ever put back — one separator missing at random until
+        the next rebuild.
         """
         prev = self._hidden_line
         self._hidden_line = None
         if prev is not None:
-            w, original, applied = prev
             try:
-                # Don't clobber a stylesheet something else has re-set since
-                # (a drag reorder rewrites every row's).
-                if w.styleSheet() == applied:
-                    w.setStyleSheet(original)
+                prev.setProperty("nosep", "")
+                prev.style().unpolish(prev)
+                prev.style().polish(prev)
             except RuntimeError:
                 pass                      # container died with a rebuild
 
         if self._scroll_area is None:
             return
+        # invalidate() BEFORE activate(): activate() alone re-lays-out from
+        # cached hints, and the rows' setFixedHeight from the uniform-height
+        # pass only schedules its geometry update. At startup that left the
+        # row POSITIONS on the previous, taller pitch while their heights had
+        # already shrunk — so the hit test below matched a row one place too
+        # high and hid the wrong separator, with nothing to correct it later.
+        self._grid.invalidate()
         self._grid.activate()
         vp_bottom = (self._scroll_area.verticalScrollBar().value()
                      + self._scroll_area.viewport().height())
@@ -1944,20 +2140,25 @@ class MainWindow(QMainWindow):
         # row's line showing right above the footer rule, so count that as
         # flush too. Any deeper and a partial row covers it.
         tol = max(self._grid.spacing(), 2)
-        target = None
+        # Take the CLOSEST match, not the first. The tolerance equals the
+        # inter-row gap, so whenever the rows fill the viewport exactly the
+        # second-to-last row sits exactly `tol` away and passes this test as
+        # well — and breaking on the first hit then hid the separator one row
+        # too high, permanently, since nothing else would ever pick it up.
+        target, best = None, None
         for i in range(self._grid.count()):
             w = self._grid.itemAt(i).widget()
-            if w is not None and 0 <= vp_bottom - (w.y() + w.height()) <= tol:
-                target = w
-                break
-        if target is None:
-            return
-        original = target.styleSheet()
-        stripped = _BORDER_BOTTOM.sub("", original)
-        if stripped == original:
+            if w is None:
+                continue
+            delta = vp_bottom - (w.y() + w.height())
+            if 0 <= delta <= tol and (best is None or delta < best):
+                target, best = w, delta
+        if target is None or "border-bottom" not in target.styleSheet():
             return                        # this row draws no line anyway
-        target.setStyleSheet(stripped)
-        self._hidden_line = (target, original, stripped)
+        target.setProperty("nosep", "1")
+        target.style().unpolish(target)
+        target.style().polish(target)
+        self._hidden_line = target
 
     def _content_height(self):
         heights = self._row_heights()

@@ -332,14 +332,21 @@ class DragController:
             border_css = (f"border-bottom: 1px solid {t['row_line']};"
                           if needs_sep else "")
 
+            # These rewrites replace the whole stylesheet, so the hover rule
+            # RowFactory baked in has to be re-appended — without it a row
+            # silently stops tinting on hover after the first drag.
+            hover_css = (f" #rowBg[hov=\"1\"] {{"
+                         f" background-color: {t['row_hover_bg']}; }}"
+                         f" #rowBg[nosep=\"1\"] {{ border-bottom: none; }}")
             if row["type"] == "separator":
                 group_line = t["group_line"]
                 container.setStyleSheet(
                     f"#rowBg {{ background-color: {row_bg}; {margin_css}"
-                    f" border: 2px solid {group_line}; }}")
+                    f" border: 2px solid {group_line}; }}" + hover_css)
             else:
                 container.setStyleSheet(
-                    f"#rowBg {{ background-color: {row_bg}; {margin_css} {border_css} }}")
+                    f"#rowBg {{ background-color: {row_bg}; {margin_css} {border_css} }}"
+                    + hover_css)
 
             container.show()
             h._grid.insertWidget(insert_idx, container)
@@ -349,6 +356,11 @@ class DragController:
         # Every row's stylesheet was just rewritten, restoring the separator
         # on whichever row was hiding it. Re-pick the bottom-most one.
         h._update_bottom_line()
+        # This path reuses the existing containers instead of rebuilding, so
+        # nothing else moves the dragged row's gap fill — it would sit at the
+        # position the row started from. activate() above is what makes the
+        # new geometry readable here.
+        h._sync_drag_strip()
 
     def _row_at_y(self, y):
         """Return the visible row index whose vertical center is closest to y."""

@@ -52,7 +52,7 @@ class RowFactory:
             f"#rowBg {{ background-color: {row_bg}; {margin_css}"
             f" border: 2px solid {group_line}; }}"
             f" #rowBg[hov=\"1\"] {{"
-            f" background-color: {blueprint.theme['row_drag_bg']}; }}")
+            f" background-color: {blueprint.theme['row_hover_bg']}; }}")
         row_container_layout = QHBoxLayout(row_container)
         row_container_layout.setContentsMargins(3, 3, 3, 3)
         row_container_layout.setSpacing(blueprint.h_spacing)
@@ -115,6 +115,7 @@ class RowFactory:
             "name": name_lbl, "time": time_lbl,
             "count": count_lbl, "x": x_btn,
             "container": row_container, "is_group": True,
+            "bg_left": 0,          # separators are never indented
         }
         return row_container, widget_dict
 
@@ -164,10 +165,14 @@ class RowFactory:
             border_css = ""
         # The hover tint is a SELECTOR, not a stylesheet the host rewrites —
         # see _on_row_hover for why that distinction matters.
+        # nosep: _update_bottom_line drops the separator on whichever row is
+        # flush with the viewport bottom, so it doesn't stack with the footer
+        # rule. A selector, not a stylesheet edit — see _update_bottom_line.
         rc.setStyleSheet(
             f"#rowBg {{ background-color: {row_bg}; {margin_css} {border_css} }}"
             f" #rowBg[hov=\"1\"] {{"
-            f" background-color: {blueprint.theme['row_drag_bg']}; }}")
+            f" background-color: {blueprint.theme['row_hover_bg']}; }}"
+            f" #rowBg[nosep=\"1\"] {{ border-bottom: none; }}")
         rc_lay = QHBoxLayout(rc)
         # Bottom margin only when a separator line is drawn there — the
         # stylesheet border paints inside the row's rect, so without this the
@@ -266,6 +271,10 @@ class RowFactory:
             "minus": minus_btn, "plus": plus_btn,
             "x": x_btn, "bullet": bullet,
             "container": rc,
+            # margin-left insets the PAINTED background without moving the
+            # widget, so the container's geometry alone doesn't describe where
+            # the row's colour actually starts. The hover strip needs to know.
+            "bg_left": (blueprint.indent_px - 3) if is_child else 0,
         }
         return rc, widget_dict
 
