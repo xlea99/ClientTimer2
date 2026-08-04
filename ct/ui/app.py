@@ -1040,25 +1040,39 @@ class MainWindow(QMainWindow):
     # ------------------------------------------------------------------ #
 
     def _on_row_hover(self, rid, entering):
-        if rid not in self._widgets:
+        """Tint the whole row rather than underlining its name.
+
+        Driven by a dynamic property against a selector baked into the row's
+        stylesheet, NOT by rewriting that stylesheet. _update_bottom_line
+        already rewrites row stylesheets — it strips the separator under the
+        bottom-most row and remembers the exact string it replaced so it can
+        put it back. If hover edited the same string, scrolling while hovering
+        would capture the tinted version as the row's resting colour and the
+        highlight would stick after the mouse left.
+        """
+        w = self._widgets.get(rid)
+        if not w:
             return
-        name_lbl = self._widgets[rid]["name"]
-        f = name_lbl.font()
-        f.setUnderline(entering)
-        name_lbl.setFont(f)
+        rc = w.get("container")
+        if rc is None:
+            return
+        rc.setProperty("hov", "1" if entering else "")
+        rc.style().unpolish(rc)
+        rc.style().polish(rc)
 
     def _on_time_hover(self, rid, entering):
-        """Hovering the time underlines the name AND the time.
+        """The time is a click target nested inside an already-tinted row.
 
-        Entering the label sends Leave to the row container, which clears the
-        name's underline — so re-apply it here to keep both marked.
+        The tint marks the row; the underline marks the smaller target within
+        it, so the two read as nested rather than saying the same thing twice.
+        Entering the label sends Leave to the container, which would drop the
+        tint — so re-assert it here.
         """
         if rid not in self._widgets:
             return
-        for key in ("name", "time"):
-            lbl = self._widgets[rid].get(key)
-            if lbl is None:
-                continue
+        self._on_row_hover(rid, entering)
+        lbl = self._widgets[rid].get("time")
+        if lbl is not None:
             f = lbl.font()
             f.setUnderline(entering)
             lbl.setFont(f)

@@ -304,18 +304,25 @@ class AppState:
         # Retired/renamed themes — migrate saved references so old installs
         # land on a real theme, not a ghost name. Only the Cupertino
         # retirement is toast-worthy; the E-Ink rename is cosmetic.
+        # Every theme name that has EVER shipped must resolve to a live theme.
+        # These are persisted in state.json, so an entry can never be removed
+        # once added — dropping one silently resets that user to the default.
         _THEME_RENAMES = {
             "Cupertino Light":       "E-Ink (Default)",
             "E-Ink":                 "E-Ink (Default)",
-            "Pretty In Pink-Mobile": "Ring Around The Rosie",
-            # Retired: Cold Transfer owns the cold-blues slot and actually
-            # pops on this app, which Nord never did.
+            "Black Herizons":        "Emergency Calls Only",
+            # Renamed during the 1.3 theme pass.
+            "Hazard Stripe":         "Scheduled Maintenance",
+            "Windows 95":            "95 Windows",
+            "Ring Around The Rosie": "Soft Reset",
+            "Pretty In Pink-Mobile": "Soft Reset",
+            "Lavender Overtime":     "Soft Reset",
+            "Still on SOS":          "Emergency Calls Only",
+            "Carbon Copy":           "Do Not Disturb",
+            "Beeline":               "Scheduled Maintenance",
+            # Retired outright.
             "Muted Dev-Dark":        "Cold Transfer",
-            # Two swings at the same 80s vibe; Trapper Keeper is the one that
-            # landed. Neither shipped, but they were live here long enough to
-            # be selected, and a missing theme falls back to the default.
-            "Vapor Trunk":           "Trapper Keeper",
-            "All Skate":             "Trapper Keeper",
+            "Please Hold":           "NOCturnal",
         }
         theme_renamed = settings.theme == "Cupertino Light"
         if settings.theme in _THEME_RENAMES:

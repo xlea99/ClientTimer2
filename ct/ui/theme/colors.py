@@ -14,53 +14,37 @@
 # 1 for themes with hard edges. control_line is the color that width paints in
 # (and the always-on 1px edge around lists, tables and menus).
 THEMES = {
+    # Charcoal, cream and brass. The gold used to fill every Start/Stop, which
+    # put the loudest colour on the least important elements and left the
+    # running row as the eleventh gold thing on screen. Buttons now recede to
+    # charcoal with a hairline and gold survives only where it means
+    # something: hover, the running row, the running group, a band outline.
     "A Way": {
         "app_bg":            "#292929",
         "app_fg":            "#FDF7D1",
         "app_fg_muted":      "#706D4A",
-        "control_bg":        "#E8B20F",
-        "control_fg":        "#111111",
-        "control_hover_bg":  "#FFD75A",
+        "control_bg":        "#383838",
+        "control_fg":        "#FDF7D1",
+        "control_hover_bg":  "#E8B20F",
         "control_hover_fg":  "#111111",
-        "control_line":      "rgba(128,128,128,0.4)",
-        "control_border_px": 0,
+        "control_line":      "#4A4436",
+        "control_border_px": 1,
         "row_running_fg":    "#FFD75A",
         "row_drag_bg":       "#A4860F",
         "row_line":          "#4A3D1C",
-        "group_bg":          "#1A1606",
+        # Was #1A1606 — a near-black BROWN, the only value not drawn from the
+        # charcoal or gold families, which read as a stain rather than a band.
+        "group_bg":          "#1C1C1C",
         "group_fg":          "#FDF7D1",
-        "group_running_fg":  "#FFE47A",
-        "group_line":        "#1A1606",
-        "chrome_line":       "#1A1606",
+        # Was #FFE47A, a pale gold barely distinguishable from the cream idle
+        # text — the active group was nearly a no-op. Full brass reads.
+        "group_running_fg":  "#E8B20F",
+        "group_line":        "#E8B20F",
+        "chrome_line":       "#5A4A12",
         "toast_bg":          "#FDF7D1",
         "toast_fg":          "#1A1606",
     },
-    "Black Herizons": {
-        "app_bg":            "#000000",
-        "app_fg":            "#F5F5F5",
-        "app_fg_muted":      "#666666",
-        "control_bg":        "#FFFFFF",
-        "control_fg":        "#000000",
-        "control_hover_bg":  "#EE0000",
-        "control_hover_fg":  "#F5F5F5",
-        "control_line":      "#929292",
-        "control_border_px": 1,
-        "row_running_fg":    "#EE0000",
-        "row_drag_bg":       "#7A0000",
-        "row_line":          "#2A2A2A",
-        "group_bg":          "#EE0000",
-        "group_fg":          "#FFFFFF",
-        "group_running_fg":  "#FFFFFF",
-        "group_line":        "#EE0000",
-        "chrome_line":       "#FFFFFF",
-        "toast_bg":          "#EE0000",
-        "toast_fg":          "#FFFFFF",
-    },
-    # Proton Mail's dark mode, whose own name for it is "Carbon" — so the pun
-    # wrote itself. Faithful to their palette: #16141C ground, #292733 fields,
-    # #423D4D hairlines, and the brand purple #6D4AFF doing every single
-    # interactive job. One accent, used sparingly, on a warm-neutral dark.
-    "Carbon Copy": {
+    "Do Not Disturb": {
         "app_bg":            "#16141C",
         "app_fg":            "#FFFFFF",
         "app_fg_muted":      "#8F8D9E",
@@ -102,9 +86,6 @@ THEMES = {
         "toast_bg":          "#023F71",
         "toast_fg":          "#FDFDFD",
     },
-    # Named for the move where you dump a caller on a colleague with no
-    # warning. Deep frozen slate, hard 1px edges, and the only warm thing on
-    # screen is nothing at all — a running timer glows glacier cyan instead.
     "Cold Transfer": {
         "app_bg":            "#0E1A22",
         "app_fg":            "#DCEEF2",
@@ -210,7 +191,7 @@ THEMES = {
         "toast_bg":          "#707070",
         "toast_fg":          "#FFFFFF",
     },
-    "Hazard Stripe": {
+    "Scheduled Maintenance": {
         "app_bg":            "#000000",
         "app_fg":            "#F5F5F5",
         "app_fg_muted":      "#666666",
@@ -336,7 +317,7 @@ THEMES = {
         "toast_bg":          "#860043",
         "toast_fg":          "#FFFFFF",
     },
-    "Windows 95": {
+    "95 Windows": {
         "app_bg":            "#C0C0C0",
         "app_fg":            "#000000",
         "app_fg_muted":      "#808080",
@@ -399,7 +380,7 @@ THEMES = {
         "toast_bg":          "#F05A28",
         "toast_fg":          "#160B06",
     },
-    "Lavender Overtime": {
+    "Soft Reset": {
         "app_bg":            "#F3F0FA",
         "app_fg":            "#302A40",
         "app_fg_muted":      "#A39AAF",
@@ -419,5 +400,68 @@ THEMES = {
         "chrome_line":       "#C5B8D8",
         "toast_bg":          "#7053A5",
         "toast_fg":          "#FFFFFF",
-    }
+    },
+    "Emergency Calls Only": {
+        "app_bg":            "#0B0E11",
+        "app_fg":            "#B9C2C9",
+        "app_fg_muted":      "#4C555D",
+        "control_bg":        "#14181D",
+        "control_fg":        "#B9C2C9",
+        "control_hover_bg":  "#1F262E",
+        "control_hover_fg":  "#DCE3E9",
+        "control_line":      "#262D35",
+        "control_border_px": 1,
+        "row_running_fg":    "#FF3B30",
+        "row_drag_bg":       "#1E262F",
+        "row_line":          "#161A1F",
+        "group_bg":          "#0F1318",
+        "group_fg":          "#6E7880",
+        "group_running_fg":  "#FF3B30",
+        "group_line":        "#232A31",
+        "chrome_line":       "#262D35",
+        "toast_bg":          "#DCE3E9",
+        "toast_fg":          "#0B0E11",
+    },
+    "Copper Sunset": {
+        "app_bg":            "#14211E",
+        "app_fg":            "#E6DCCE",
+        "app_fg_muted":      "#6E8177",
+        "control_bg":        "#1E2E29",
+        "control_fg":        "#E6DCCE",
+        "control_hover_bg":  "#4F9682",
+        "control_hover_fg":  "#0E1614",
+        "control_line":      "#33574C",
+        "control_border_px": 1,
+        "row_running_fg":    "#E07B45",
+        "row_drag_bg":       "#2C4A41",
+        "row_line":          "#1C2B27",
+        "group_bg":          "#22463D",
+        "group_fg":          "#DCE9E1",
+        "group_running_fg":  "#F09A5E",
+        "group_line":        "#2E6154",
+        "chrome_line":       "#3A6659",
+        "toast_bg":          "#C16D4E",
+        "toast_fg":          "#17100C",
+    },
+    "Out Of Office": {
+        "app_bg":            "#F2EBDA",
+        "app_fg":            "#2C3A36",
+        "app_fg_muted":      "#A89A80",
+        "control_bg":        "#E6DCC5",
+        "control_fg":        "#2C3A36",
+        "control_hover_bg":  "#9ED3CC",
+        "control_hover_fg":  "#16302F",
+        "control_line":      "#D9CBAF",
+        "control_border_px": 0,
+        "row_running_fg":    "#0E8C87",
+        "row_drag_bg":       "#DCEAE0",
+        "row_line":          "#E5DAC2",
+        "group_bg":          "#C9E0D6",
+        "group_fg":          "#24443F",
+        "group_running_fg":  "#0A6E6A",
+        "group_line":        "#B4CDC1",
+        "chrome_line":       "#C4B292",
+        "toast_bg":          "#0E8C87",
+        "toast_fg":          "#F7F1E3",
+    },
 }

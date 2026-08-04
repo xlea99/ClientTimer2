@@ -50,7 +50,9 @@ class RowFactory:
         row_container.setObjectName("rowBg")
         row_container.setStyleSheet(
             f"#rowBg {{ background-color: {row_bg}; {margin_css}"
-            f" border: 2px solid {group_line}; }}")
+            f" border: 2px solid {group_line}; }}"
+            f" #rowBg[hov=\"1\"] {{"
+            f" background-color: {blueprint.theme['row_drag_bg']}; }}")
         row_container_layout = QHBoxLayout(row_container)
         row_container_layout.setContentsMargins(3, 3, 3, 3)
         row_container_layout.setSpacing(blueprint.h_spacing)
@@ -160,8 +162,12 @@ class RowFactory:
             border_css = f"border-bottom: 1px solid {blueprint.theme['row_line']};"
         else:
             border_css = ""
+        # The hover tint is a SELECTOR, not a stylesheet the host rewrites —
+        # see _on_row_hover for why that distinction matters.
         rc.setStyleSheet(
-            f"#rowBg {{ background-color: {row_bg}; {margin_css} {border_css} }}")
+            f"#rowBg {{ background-color: {row_bg}; {margin_css} {border_css} }}"
+            f" #rowBg[hov=\"1\"] {{"
+            f" background-color: {blueprint.theme['row_drag_bg']}; }}")
         rc_lay = QHBoxLayout(rc)
         # Bottom margin only when a separator line is drawn there — the
         # stylesheet border paints inside the row's rect, so without this the
