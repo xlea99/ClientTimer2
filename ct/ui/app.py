@@ -1399,8 +1399,16 @@ class MainWindow(QMainWindow):
         # Its own y() is by definition a flush position — see _row_offsets.
         bar.setValue(min(w.y(), bar.maximum()))
 
-    def _copy_session(self):
-        """Copy every non-zero time to the clipboard, one row per line."""
+    def _session_lines(self):
+        """Every non-zero time, one row per line, in display order.
+
+        Split out from _copy_session so it can be checked without going
+        through the system clipboard — that is a single global resource
+        shared with every other app on the machine, so a test that reads it
+        back fails whenever something else happens to hold it.
+
+        current_elapsed, not elapsed: a running timer copies as it reads.
+        """
         lines = []
         for row in self._state.rows:
             if row["type"] != "timer":
@@ -1409,6 +1417,11 @@ class MainWindow(QMainWindow):
             if ts is None or ts.current_elapsed < 1:
                 continue
             lines.append(f"{ts.name}: {format_time(ts.current_elapsed)}")
+        return lines
+
+    def _copy_session(self):
+        """Copy every non-zero time to the clipboard, one row per line."""
+        lines = self._session_lines()
         if not lines:
             self.show_toast("No times to copy yet", 4)
             return

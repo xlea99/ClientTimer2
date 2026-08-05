@@ -540,7 +540,9 @@ class ConfigDialog(QDialog):
     def _toast_main(self, message):
         main = self.parentWidget()
         if main is not None and hasattr(main, "show_toast"):
-            main.show_toast(message, 4)
+            # Copy confirmations only need to be seen, not read — the
+            # clipboard already has the payload.
+            main.show_toast(message, 2.5)
 
     # ------------------------------------------------------------------ #
     #  Shared table selection / state preview                              #
@@ -778,7 +780,7 @@ class ConfigDialog(QDialog):
         main = self.parentWidget()
         if main is not None and hasattr(main, "show_toast"):
             main.show_toast(
-                f"Time for {name} ({time_str}) copied to clipboard", 4)
+                f"Time for {name} ({time_str}) copied to clipboard", 2.5)
 
     def _on_show_zero_times(self, checked):
         """Re-render the open session preview with or without zero-time rows."""
