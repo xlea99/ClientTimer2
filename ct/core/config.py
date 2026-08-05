@@ -309,20 +309,7 @@ class AppState:
         # once added — dropping one silently resets that user to the default.
         _THEME_RENAMES = {
             "Cupertino Light":       "E-Ink (Default)",
-            "E-Ink":                 "E-Ink (Default)",
-            "Black Herizons":        "Emergency Calls Only",
-            # Renamed during the 1.3 theme pass.
-            "Hazard Stripe":         "Scheduled Maintenance",
-            "Windows 95":            "95 Windows",
-            "Ring Around The Rosie": "Soft Reset",
-            "Pretty In Pink-Mobile": "Soft Reset",
-            "Lavender Overtime":     "Soft Reset",
-            "Still on SOS":          "Emergency Calls Only",
-            "Carbon Copy":           "Do Not Disturb",
-            "Beeline":               "Scheduled Maintenance",
-            # Retired outright.
-            "Muted Dev-Dark":        "Cold Transfer",
-            "Please Hold":           "NOCturnal",
+            "Black Herizons":        "Emergency Calls Only"
         }
         theme_renamed = settings.theme == "Cupertino Light"
         if settings.theme in _THEME_RENAMES:

@@ -47,6 +47,16 @@ class PreviewRow(QWidget):
         super().mousePressEvent(event)
 
 
+def _pretty_date(iso):
+    """'2026-08-05' -> 'August 5, 2026'. Returns the input on anything odd,
+    so a hand-edited RELEASE_DATE can never blank the About page."""
+    try:
+        d = datetime.strptime(iso, "%Y-%m-%d")
+    except (ValueError, TypeError):
+        return str(iso)
+    return f"{d.strftime('%B')} {d.day}, {d.year}"
+
+
 def _format_span(start_iso, end_iso):
     """Format a start–end ISO pair as a human-readable AM/PM span string.
 
@@ -109,18 +119,30 @@ class ConfigDialog(QDialog):
         self._tab_list = QListWidget()
         self._tab_list.setFixedWidth(140)
         self._tab_list.setFont(QFont("Calibri", 12))
+        # Sidebar order and stack order are index-matched by _on_tab_changed,
+        # so these two lists must stay in lockstep.
+        self._tab_list.addItem("About")
         self._tab_list.addItem("General")
         self._tab_list.addItem("Daily Reset")
         self._tab_list.addItem("Appearance")
-        self._tab_list.setCurrentRow(0)
+        # About sits at the top but is not where you land — the dialog opens
+        # on the page people actually came to change. The matching stack page
+        # is selected below, once the stack exists: this runs before the
+        # signal is connected (and before _stack is built), so setting the row
+        # here does NOT move the stack on its own.
+        self._tab_list.setCurrentRow(1)
         self._tab_list.currentRowChanged.connect(self._on_tab_changed)
         pages.addWidget(self._tab_list)
 
         # Right content
         self._stack = QStackedWidget()
+        self._stack.addWidget(self._build_about_page())
         self._stack.addWidget(self._build_general_page(cfg, on_reset))
         self._stack.addWidget(self._build_daily_reset_page(cfg))
         self._stack.addWidget(self._build_appearance_page(cfg))
+        # Sync the stack to the pre-selected row. Without this the sidebar
+        # highlights General while the stack still shows page 0.
+        self._stack.setCurrentIndex(self._tab_list.currentRow())
         pages.addWidget(self._stack, 1)
 
         left_col.addLayout(pages, 1)
@@ -963,6 +985,47 @@ class ConfigDialog(QDialog):
     # ------------------------------------------------------------------ #
     #  Appearance page                                                     #
     # ------------------------------------------------------------------ #
+
+    def _build_about_page(self):
+        """Which build am I running?
+
+        Reads ct.common.version, NOT latest.json — this states what is
+        INSTALLED. The manifest states what EXISTS on the server, and an
+        update check is the comparison of the two. Sourcing this from the
+        manifest would make the page confidently report a version the user
+        does not have.
+
+        Deliberately sparse: Check For Updates and Report A Problem land here
+        later, and a page that starts crowded has nowhere to put them.
+        """
+        from ct.common.version import __version__, RELEASE_DATE
+
+        page = QWidget()
+        lay = QVBoxLayout(page)
+        lay.setSpacing(12)
+
+        title = QLabel("Client Timer 2")
+        title.setFont(QFont("Calibri", 18, QFont.Bold))
+        lay.addWidget(title)
+
+        for caption, value in (("Version:", __version__),
+                               ("Released:", _pretty_date(RELEASE_DATE))):
+            row = QHBoxLayout()
+            lbl = QLabel(caption)
+            lbl.setFont(QFont("Calibri", 12, QFont.Bold))
+            lbl.setFixedWidth(90)
+            val = QLabel(value)
+            val.setFont(QFont("Calibri", 12))
+            # Selectable so a bug report can carry the exact build without
+            # the user having to transcribe it.
+            val.setTextInteractionFlags(Qt.TextSelectableByMouse)
+            row.addWidget(lbl)
+            row.addWidget(val)
+            row.addStretch()
+            lay.addLayout(row)
+
+        lay.addStretch()
+        return page
 
     def _build_appearance_page(self, cfg):
         page = QWidget()
