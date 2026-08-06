@@ -1,14 +1,21 @@
 ; Inno Setup Script for Client Timer 2
 ; Requires Inno Setup 6.x — https://jrsoftware.org/isinfo.php
 ;
-; Build steps:
-;   1. Run: pyinstaller clienttimer2.spec --noconfirm
-;   2. Open this file in Inno Setup Compiler and click Build
+; Build: run `python release.py <version>` from the repo root. It bumps the
+; version, builds, compiles this script with ISCC, and writes latest.json.
+; Compiling this file by hand (GUI or ISCC) still works and uses whatever
+; version.iss currently says.
 
 #define MyAppName "Client Timer 2"
 #define MyAppExeName "clienttimer2.exe"
-#define MyAppVersion "2.3.0"
 #define MyAppPublisher "Alex Somheil"
+
+; MyAppVersion lives in a generated file so the number is typed in exactly
+; one place — ct/common/version.py. It used to be hardcoded here, which meant
+; About and Add/Remove Programs could disagree, and the exe's filename (built
+; from MyAppVersion below) could disagree with the URL in latest.json. That
+; last one 404s the download for every user.
+#include "version.iss"
 
 ; Paths relative to this .iss file
 #define ProjectRoot ".."

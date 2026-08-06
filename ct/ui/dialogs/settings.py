@@ -1090,14 +1090,47 @@ class ConfigDialog(QDialog):
             lay.addLayout(row)
 
         row = QHBoxLayout()
-        report_btn = QPushButton("Report a Problem")
-        report_btn.clicked.connect(self._on_report_problem)
-        row.addWidget(report_btn)
+        check_btn = QPushButton("Check for Updates")
+        check_btn.clicked.connect(self._on_check_updates)
+        row.addWidget(check_btn)
+        notes_btn = QPushButton("Release Notes")
+        notes_btn.setToolTip("Opens the releases page in your browser")
+        notes_btn.clicked.connect(self._on_release_notes)
+        row.addWidget(notes_btn)
         row.addStretch()
         lay.addLayout(row)
 
+        row2 = QHBoxLayout()
+        report_btn = QPushButton("Report a Problem")
+        report_btn.clicked.connect(self._on_report_problem)
+        row2.addWidget(report_btn)
+        row2.addStretch()
+        lay.addLayout(row2)
+
         lay.addStretch()
         return page
+
+    def _on_check_updates(self):
+        """Run a check the user explicitly asked for.
+
+        Closes the dialog first: the answer arrives as a toast on the main
+        window, which would otherwise appear behind this modal and look like
+        nothing happened.
+        """
+        main = self.parentWidget()
+        if main is not None and hasattr(main, "_start_update_check"):
+            self.reject()
+            main._start_update_check(forced=True)
+
+    def _on_release_notes(self):
+        """Open the GitHub releases page — that is where the changelog is.
+
+        The manifest's `notes` is one line sized for a toast. The release
+        body is the real thing, with markdown and every past version, and a
+        browser renders it better than any panel here would.
+        """
+        from ct.core.update import release_page_url
+        QDesktopServices.openUrl(QUrl(release_page_url()))
 
     def _on_report_problem(self):
         from ct.common import crash

@@ -87,8 +87,8 @@ class MainWindow(QMainWindow):
     # completes, logs happily, and the result silently evaporates. Signals
     # are thread-safe and queue onto the receiver's thread, which is the
     # whole point of them.
-    _update_found = Signal(object)        # manifest dict
-    _update_downloaded = Signal(object)   # Path, or None on failure
+    _update_checked = Signal(str, object)   # (status, manifest|None)
+    _update_downloaded = Signal(object)     # Path, or None on failure
 
     def __init__(self):
         # Load state before super().__init__() so we can pass the correct
@@ -243,7 +243,7 @@ class MainWindow(QMainWindow):
 
         # Update check. Deferred so it never sits in front of the first paint,
         # and threaded so a slow CDN cannot hold the window hostage.
-        self._update_found.connect(self._offer_update)
+        self._update_checked.connect(self._on_update_checked)
         self._update_downloaded.connect(self._install_update)
         QTimer.singleShot(2500, self._start_update_check)
 
@@ -2418,24 +2418,39 @@ class MainWindow(QMainWindow):
     #  Updates                                                             #
     # ------------------------------------------------------------------ #
 
-    def _start_update_check(self):
+    def _start_update_check(self, forced=False):
         """Look for a newer release on a worker thread.
 
         Checks on every launch, but only PROMPTS once a day — the check is
-        free and silent, the prompt is the thing with a cost.
+        free and silent, the prompt is the thing with a cost. `forced` is a
+        check the user asked for from the About page: it skips the daily gate
+        and reports every outcome, because a button that does nothing visible
+        reads as broken.
         """
         import threading
         from ct.core import update
 
         def worker():
-            manifest = update.check()
-            if manifest:
-                # Back to the GUI thread. Must be a signal, not a QTimer —
-                # see the class-level comment on _update_found.
-                self._update_found.emit(manifest)
+            status, manifest = update.check()
+            # Back to the GUI thread. Must be a signal, not a QTimer — see
+            # the class-level comment on _update_checked.
+            self._update_checked.emit(status, manifest)
 
         threading.Thread(target=worker, daemon=True,
                          name="ct2-update-check").start()
+        self._update_forced = forced
+
+    def _on_update_checked(self, status, manifest):
+        from ct.core import update
+        from ct.common.version import __version__ as installed
+        forced = getattr(self, "_update_forced", False)
+        self._update_forced = False
+        if status == update.UPDATE:
+            self._offer_update(manifest, forced=forced)
+        elif forced and status == update.CURRENT:
+            self.show_toast(f"You're up to date ({installed})", 4)
+        elif forced:
+            self.show_toast("Couldn't check for updates right now", 4)
 
     def _due_for_update_prompt(self):
         """True if the user has not been shown a prompt in the last 24h.
@@ -2453,9 +2468,15 @@ class MainWindow(QMainWindow):
             return True                      # unreadable: treat as never
         return (datetime.now().astimezone() - last).total_seconds() >= 86400
 
-    def _offer_update(self, manifest):
-        """The one user-visible moment in the whole update path."""
-        if not self._due_for_update_prompt():
+    def _offer_update(self, manifest, forced=False):
+        """The one user-visible moment in the whole update path.
+
+        `forced` skips the once-a-day gate: if someone just clicked Check For
+        Updates, withholding the answer because they were told yesterday
+        would be absurd. It still stamps the clock, so they don't get the
+        automatic prompt an hour later as well.
+        """
+        if not forced and not self._due_for_update_prompt():
             return
         version = manifest.get("version", "")
         self._state.settings.last_update_prompt = now_iso()
@@ -2482,7 +2503,10 @@ class MainWindow(QMainWindow):
         self.show_toast("Downloading update…", 0)
 
         def worker():
-            path = update.download(manifest["url"])
+            # .get() — a manifest published before checksums existed simply
+            # has no claim to check, which download() treats as "skip".
+            path = update.download(manifest["url"],
+                                   sha256=manifest.get("sha256"))
             self._update_downloaded.emit(path)
 
         threading.Thread(target=worker, daemon=True,

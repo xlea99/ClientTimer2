@@ -10,11 +10,14 @@ Run:  python -m pytest tests/test_ct2.py -v
 import copy
 import json
 import os
+import re
 import shutil
 import tempfile
 import traceback
 import time
 import unittest
+
+from ct.util import now_iso
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import patch
@@ -1249,7 +1252,9 @@ class QtWindowTestBase(StatePathMixin, SnapshotDirMixin, unittest.TestCase):
 
         self.win = MainWindow()
         self.toasts = []
-        self.win.show_toast = lambda m, s=5: self.toasts.append(m)
+        # **kw so it survives show_toast growing parameters; tests that
+        # need the real widget delete this stub in their own setUp.
+        self.win.show_toast = lambda m, s=5, **kw: self.toasts.append(m)
         self.win._try_snapshot = lambda *a, **k: None
         self.win._state.rows = [dict(r) for r in self.ROWS]
         self.win.timers = {r["rowid"]: TimerState(r["name"])
@@ -1675,6 +1680,90 @@ class TestQtStatusLine(QtWindowTestBase):
         self.assertEqual(self.win._status_lbl.toolTip(), "")
 
 
+class TestQtUpdateThreading(QtWindowTestBase):
+    """The result must cross from the worker thread into the GUI thread.
+
+    This is the test for the bug that cost the most time: the check ran on a
+    plain threading.Thread and handed its result back via
+    QTimer.singleShot. A QTimer created on a thread with no Qt event loop
+    NEVER FIRES — so the check succeeded, logged "Update available", and the
+    result silently evaporated. Everything reported success; nothing happened.
+
+    The probe that missed it called the handler directly on the main thread,
+    exercising the UI and never the hop. These drive the real worker, so they
+    fail if a QTimer is ever put back there.
+    """
+
+    MANIFEST = {"version": "99.0.0", "url": "https://example.com/x.exe",
+                "notes": "n"}
+
+    def setUp(self):
+        super().setUp()
+        del self.win.show_toast          # exercise the real widget
+
+    def pump(self, predicate, seconds=3.0):
+        """Spin the event loop until predicate() or the deadline.
+
+        settle() is a fixed number of iterations; a worker thread needs
+        wall-clock time, and how much depends on the machine.
+        """
+        end = time.time() + seconds
+        while time.time() < end:
+            self.settle(2)
+            if predicate():
+                return True
+            time.sleep(0.02)
+        return False
+
+    def toast_says(self, fragment):
+        return lambda: fragment.lower() in self.win._toast.text().lower()
+
+    def test_check_result_reaches_the_ui_from_a_worker_thread(self):
+        self.win._state.settings.last_update_prompt = ""
+        with patch("ct.core.update.check",
+                   return_value=("update", self.MANIFEST)):
+            self.win._start_update_check()
+            got = self.pump(self.toast_says("99.0.0"))
+        self.assertTrue(got, "the worker's result never reached the GUI thread")
+        self.assertTrue(self.win._toast_action.isVisible())
+
+    def test_download_result_reaches_the_ui_from_a_worker_thread(self):
+        """The download hop had the identical bug waiting behind it."""
+        with patch("ct.core.update.download", return_value=None):
+            self.win._do_update(self.MANIFEST)
+            got = self.pump(self.toast_says("failed"))
+        self.assertTrue(got, "the download result never reached the GUI thread")
+
+    def test_a_forced_check_answers_even_when_up_to_date(self):
+        """A button that does nothing visible reads as broken."""
+        with patch("ct.core.update.check", return_value=("current", {})):
+            self.win._start_update_check(forced=True)
+            self.assertTrue(self.pump(self.toast_says("up to date")))
+
+    def test_a_forced_check_says_so_when_it_cannot_reach_the_manifest(self):
+        """'Up to date' and 'I couldn't tell' are different answers."""
+        with patch("ct.core.update.check", return_value=("failed", None)):
+            self.win._start_update_check(forced=True)
+            self.assertTrue(self.pump(self.toast_says("couldn't check")))
+
+    def test_an_automatic_check_stays_silent_when_up_to_date(self):
+        with patch("ct.core.update.check", return_value=("current", {})):
+            self.win._start_update_check(forced=False)
+            shown = self.pump(lambda: self.win._toast_container.isVisible(), 1.0)
+        self.assertFalse(shown, "an automatic check must not toast when current")
+
+    def test_a_forced_check_ignores_the_once_a_day_gate(self):
+        """Being told yesterday is no reason to withhold an answer from
+        someone who just clicked the button."""
+        self.win._state.settings.last_update_prompt = now_iso()
+        self.assertFalse(self.win._due_for_update_prompt())
+        with patch("ct.core.update.check",
+                   return_value=("update", self.MANIFEST)):
+            self.win._start_update_check(forced=True)
+            self.assertTrue(self.pump(self.toast_says("99.0.0")))
+
+
+
 class TestQtStatusCopy(QtWindowTestBase):
     """The footer click copies every time, whatever is running."""
 
@@ -2015,30 +2104,188 @@ class TestUpdateCheck(unittest.TestCase):
         with self._with_response([1, 2, 3]):
             self.assertIsNone(fetch_manifest())
 
-    def test_check_returns_none_when_up_to_date(self):
-        from ct.core.update import check
+    def test_check_reports_current_when_up_to_date(self):
+        from ct.core.update import check, CURRENT
         from ct.common.version import __version__
         with self._with_response({"version": __version__,
                                   "url": "https://example.com/x.exe"}):
-            self.assertIsNone(check())
+            status, manifest = check()
+        self.assertEqual(status, CURRENT)
+        self.assertIsNotNone(manifest)
 
-    def test_check_returns_the_manifest_when_newer(self):
-        from ct.core.update import check
+    def test_check_reports_update_when_newer(self):
+        from ct.core.update import check, UPDATE
         payload = {"version": "99.0.0", "url": "https://example.com/x.exe",
                    "notes": "hi"}
         with self._with_response(payload):
-            got = check()
-        self.assertIsNotNone(got)
-        self.assertEqual(got["version"], "99.0.0")
+            status, manifest = check()
+        self.assertEqual(status, UPDATE)
+        self.assertEqual(manifest["version"], "99.0.0")
 
-    def test_newer_version_with_no_usable_url_is_ignored(self):
+    def test_unreachable_manifest_is_failed_not_current(self):
+        """A manual check must distinguish 'you're up to date' from 'I
+        couldn't tell'. Collapsing them would tell the user something false."""
+        import urllib.error
+        from ct.core.update import check, FAILED
+        with patch("urllib.request.urlopen",
+                   side_effect=urllib.error.URLError("no route")):
+            status, manifest = check()
+        self.assertEqual(status, FAILED)
+        self.assertIsNone(manifest)
+
+    def test_newer_version_with_no_usable_url_is_not_offered(self):
         """Advertising an update the user cannot install is worse than
         staying quiet — that is a publishing mistake, not their problem."""
-        from ct.core.update import check
+        from ct.core.update import check, UPDATE
         for bad_url in ("", "ftp://x/y.exe", "http://insecure/x.exe", None):
             with self.subTest(url=bad_url):
                 with self._with_response({"version": "99.0.0", "url": bad_url}):
-                    self.assertIsNone(check())
+                    status, _ = check()
+                self.assertNotEqual(status, UPDATE)
+
+
+class TestUpdateDownload(unittest.TestCase):
+    """Downloading the installer — the last checks before we EXECUTE a file.
+
+    The checksum's job here is narrow and worth stating: TLS already
+    guarantees the bytes arrived intact (a corrupted response fails the
+    record MAC rather than arriving quietly), so the digest is really
+    guarding the WRITE — a full disk, AV touching the file mid-write. That is
+    why verification reads back off disk instead of hashing the buffer.
+    """
+
+    def setUp(self):
+        self.dest = Path(tempfile.mkdtemp(prefix="ct2_dl_"))
+        self.addCleanup(shutil.rmtree, self.dest, True)
+        self.payload = b"MZ" + b"x" * 1_500_000        # plausible installer size
+        import hashlib
+        self.digest = hashlib.sha256(self.payload).hexdigest()
+
+    def _serving(self, body, content_length="auto"):
+        """Fake urlopen returning `body` with a Content-Length header."""
+        import contextlib, io
+
+        class FakeResponse(io.BytesIO):
+            pass
+
+        length = str(len(body)) if content_length == "auto" else content_length
+
+        @contextlib.contextmanager
+        def fake(req, timeout=None):
+            response = FakeResponse(body)
+            response.headers = {} if length is None else {"Content-Length": length}
+            # urllib's headers object is dict-like via .get
+            yield response
+        return patch("urllib.request.urlopen", fake)
+
+    def test_download_without_a_digest_still_works(self):
+        """Absent sha256 means no claim was made — not a reason to refuse.
+
+        A manifest published before checksums existed, or hand-edited in a
+        hurry, must not break updates for everyone at once."""
+        from ct.core.update import download
+        with self._serving(self.payload):
+            path = download("https://x/ClientTimer2_Setup_9.9.9.exe",
+                            dest_dir=self.dest)
+        self.assertIsNotNone(path)
+        self.assertTrue(Path(path).exists())
+
+    def test_matching_digest_is_accepted(self):
+        from ct.core.update import download
+        with self._serving(self.payload):
+            path = download("https://x/setup.exe", dest_dir=self.dest,
+                            sha256=self.digest)
+        self.assertIsNotNone(path)
+
+    def test_digest_comparison_ignores_case_and_whitespace(self):
+        """Get-FileHash yields uppercase; a hand-pasted value carries spaces.
+        Neither is a corrupt download."""
+        from ct.core.update import download
+        with self._serving(self.payload):
+            path = download("https://x/setup.exe", dest_dir=self.dest,
+                            sha256="  " + self.digest.upper() + "\n")
+        self.assertIsNotNone(path)
+
+    def test_mismatched_digest_is_refused(self):
+        from ct.core.update import download
+        with self._serving(self.payload):
+            path = download("https://x/setup.exe", dest_dir=self.dest,
+                            sha256="0" * 64)
+        self.assertIsNone(path, "a file failing its checksum was accepted")
+
+    def test_a_refused_file_is_not_left_on_disk(self):
+        """It would sit in temp with an installer's name, already declined."""
+        from ct.core.update import download
+        with self._serving(self.payload):
+            download("https://x/setup.exe", dest_dir=self.dest,
+                     sha256="0" * 64)
+        leftovers = list(self.dest.iterdir())
+        self.assertEqual(leftovers, [],
+                         f"untrusted download left behind: {leftovers}")
+
+    def test_truncated_download_is_refused(self):
+        """Content-Length disagreeing with what arrived, checked with no
+        digest present so this stays an independent guard."""
+        from ct.core.update import download
+        with self._serving(self.payload, content_length=str(len(self.payload) + 99)):
+            path = download("https://x/setup.exe", dest_dir=self.dest)
+        self.assertIsNone(path)
+
+    def test_a_tiny_response_is_never_an_installer(self):
+        """An HTML error page served with a 200 is the realistic case."""
+        from ct.core.update import download
+        with self._serving(b"<html>Not Found</html>"):
+            path = download("https://x/setup.exe", dest_dir=self.dest)
+        self.assertIsNone(path)
+
+    def test_file_sha256_matches_hashlib(self):
+        """The chunked read must agree with the one-shot hash, or every
+        release would publish a digest the client rejects."""
+        import hashlib
+        from ct.core.update import file_sha256
+        target = self.dest / "blob.bin"
+        target.write_bytes(self.payload)
+        self.assertEqual(file_sha256(target, chunk=4096),
+                         hashlib.sha256(self.payload).hexdigest())
+
+
+class TestReleaseAutomation(unittest.TestCase):
+    """The version number must have exactly one home.
+
+    It used to be hand-typed in five places across three files. These tests
+    assert the derivation still holds, because the failure is silent: a URL
+    naming a version the exe does not have 404s for every user, and nothing
+    on the publishing end looks wrong.
+    """
+
+    def repo_file(self, *parts):
+        return Path(__file__).resolve().parent.parent.joinpath(*parts)
+
+    def test_release_script_exists(self):
+        self.assertTrue(self.repo_file("release.py").exists(),
+                        "release.py is gone — the version has five homes again")
+
+    def test_setup_iss_does_not_hardcode_a_version(self):
+        """It must #include the generated file, not define its own."""
+        text = self.repo_file("installer", "clienttimer2_setup.iss").read_text(
+            encoding="utf-8")
+        self.assertNotRegex(
+            text, r'(?m)^\s*#define\s+MyAppVersion\s+"',
+            "clienttimer2_setup.iss defines MyAppVersion itself; it must "
+            "#include version.iss so the number stays in one place")
+        self.assertIn('#include "version.iss"', text)
+
+    def test_generated_iss_version_matches_version_py(self):
+        """If these drift, About and Add/Remove Programs disagree, and the
+        built exe's filename stops matching the manifest URL."""
+        from ct.common.version import __version__
+        text = self.repo_file("installer", "version.iss").read_text(
+            encoding="utf-8")
+        match = re.search(r'#define\s+MyAppVersion\s+"([^"]+)"', text)
+        self.assertIsNotNone(match, "version.iss has no MyAppVersion define")
+        self.assertEqual(match.group(1), __version__,
+                         "installer/version.iss is out of sync with "
+                         "ct/common/version.py — re-run release.py")
 
 
 class TestVersionAndManifest(unittest.TestCase):
@@ -2088,6 +2335,16 @@ class TestVersionAndManifest(unittest.TestCase):
                       "latest.json advertises a version its download URL "
                       "does not match")
         self.assertTrue(m["url"].startswith("https://"))
+
+    def test_manifest_sha256_is_well_formed_if_present(self):
+        """Optional by design — a manifest predating checksums has no claim
+        to make, and download() skips the check rather than refusing. But a
+        digest that IS there must be a real one, because a malformed value
+        fails every download instead of none."""
+        m = self.manifest()
+        if "sha256" not in m:
+            self.skipTest("this manifest predates checksums")
+        self.assertRegex(m["sha256"], r"^[0-9a-fA-F]{64}$")
 
 
 class TestThemeColors(unittest.TestCase):
