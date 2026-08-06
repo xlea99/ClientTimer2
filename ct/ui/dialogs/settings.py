@@ -7,6 +7,7 @@ from pathlib import Path
 from PySide6.QtCore import Qt, QTime, QUrl, Signal
 from PySide6.QtGui import QDesktopServices, QFont, QFontMetrics
 from PySide6.QtWidgets import (
+    QPlainTextEdit,
     QAbstractItemView,
     QAbstractSpinBox,
     QApplication,
@@ -77,6 +78,70 @@ def _format_span(start_iso, end_iso):
 
 # Simple tabbed settings dialog with a left sidebar for different categories. Opens when the user clicks the little
 # gear icon in main app
+class ReportProblemDialog(QDialog):
+    """Describe a problem and send it, without leaving the app.
+
+    Two things are deliberate. The description is sent AS WRITTEN — it is
+    the one part the user chose to include, and redacting it would turn
+    "Acme's timer stopped" into nonsense. Everything attached alongside it
+    is scrubbed, because none of that was chosen. The dialog says both, so
+    nobody has to guess what leaves the machine.
+    """
+
+    def __init__(self, parent, version, theme):
+        super().__init__(parent)
+        self.setWindowTitle("Report a Problem")
+        self.setModal(True)
+        self.setMinimumWidth(460)
+        lay = QVBoxLayout(self)
+        lay.setSpacing(10)
+
+        head = QLabel("What went wrong?")
+        head.setFont(QFont("Calibri", 13, QFont.Bold))
+        lay.addWidget(head)
+
+        self._text = QPlainTextEdit()
+        self._text.setPlaceholderText(
+            "What were you doing, and what happened instead?")
+        self._text.setMinimumHeight(120)
+        # Coloured explicitly: without this the editor inherits a foreground
+        # that sits almost on top of its own background on most themes, and
+        # the one box the user has to type into is the one they can't read.
+        t = THEMES.get(theme, THEMES["E-Ink (Default)"])
+        self._text.setStyleSheet(
+            f"QPlainTextEdit {{ color: {t['app_fg']};"
+            f" background-color: {t['control_bg']};"
+            f" border: 1px solid {t['control_line']}; }}")
+        lay.addWidget(self._text)
+
+        note = QLabel(
+            f"Sent with this report: version {version}, your operating "
+            f"system, and the last part of the app log.\n"
+            f"Timer names are removed automatically — but anything you "
+            f"type above is sent exactly as written.")
+        note.setWordWrap(True)
+        note.setFont(QFont("Calibri", 10))
+        lay.addWidget(note)
+
+        row = QHBoxLayout()
+        row.addStretch()
+        cancel = QPushButton("Cancel")
+        cancel.clicked.connect(self.reject)
+        self._send = QPushButton("Send Report")
+        self._send.setDefault(True)
+        self._send.setEnabled(False)          # nothing to say, nothing to send
+        self._send.clicked.connect(self.accept)
+        row.addWidget(cancel)
+        row.addWidget(self._send)
+        lay.addLayout(row)
+
+        self._text.textChanged.connect(
+            lambda: self._send.setEnabled(bool(self._text.toPlainText().strip())))
+
+    def description(self):
+        return self._text.toPlainText().strip()
+
+
 class ConfigDialog(QDialog):
 
     def __init__(self, parent, cfg, on_reset):
@@ -1024,8 +1089,32 @@ class ConfigDialog(QDialog):
             row.addStretch()
             lay.addLayout(row)
 
+        row = QHBoxLayout()
+        report_btn = QPushButton("Report a Problem")
+        report_btn.clicked.connect(self._on_report_problem)
+        row.addWidget(report_btn)
+        row.addStretch()
+        lay.addLayout(row)
+
         lay.addStretch()
         return page
+
+    def _on_report_problem(self):
+        from ct.common import crash
+        from ct.common.version import __version__
+        dlg = ReportProblemDialog(self, __version__, self.chosen_theme)
+        if dlg.exec() != QDialog.Accepted:
+            return
+        import platform
+        ok = crash.report(
+            dlg.description(),
+            attachments=[("log_tail.txt", crash.log_tail()),
+                         ("state.json", crash.state_snapshot())],
+            context={"version": __version__,
+                     "os": platform.platform(terse=True)},
+        )
+        self._toast_main("Report sent — thank you!" if ok
+                         else "Could not send the report right now")
 
     def _build_appearance_page(self, cfg):
         page = QWidget()

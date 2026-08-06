@@ -26,6 +26,7 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
+from ct.common import crash
 from ct.common.logger import log
 from ct.common.setup import PATHS
 from ct.core.config import AppState, save_completed_session
@@ -239,67 +240,7 @@ class MainWindow(QMainWindow):
             self._pending_toast = (
                 "Some saved settings couldn't be read and were adjusted — see log")
 
-        # 0.5. Retired-theme migration notice (takes priority over the above).
-        if getattr(self._state, "theme_renamed", False):
-            self._pending_toast = (
-                "Cupertino Light has found its way to theme heaven. You've been moved to E-Ink. "
-                "16 other themes exist in settings.")
-
-        # 1. CT1 migration notification
-        #    Migration data is handled in AppState.load(). The old config.txt
-        #    is left intact as a permanent migration source — the installer
-        #    handles killing CT1's exe (the actual threat).
-        if self._state.migrated_from_ct1:
-            m = self._state.migrated_from_ct1
-            timers = ", ".join(m.get("Timers", []))
-            ct1_times = m.get("Times", {})
-
-            if ct1_times:
-                # Build a summary of the times we found
-                lines = "\n".join(
-                    f"  \u2022 {name}: {format_time(secs)}"
-                    for name, secs in ct1_times.items() if secs > 0
-                )
-                msg = QMessageBox(self)
-                msg.setWindowTitle("Welcome to Client Timer 2")
-                msg.setIcon(QMessageBox.Question)
-                msg.setText(
-                    f"Your Client Timer 1 data has been migrated!\n\n"
-                    f"Timers: {timers}\n"
-                    f"Theme: {m.get('Theme', 'E-Ink (Default)')}\n"
-                    f"Size: {m.get('Size', 'Regular')}\n\n"
-                    f"CT1 has existing times on these clients.\n"
-                    f"Would you like to carry them over?"
-                )
-                msg.setInformativeText(lines)
-                yes_btn = msg.addButton(
-                    "Migrate Times", QMessageBox.AcceptRole)
-                msg.addButton(
-                    "Start Fresh", QMessageBox.RejectRole)
-                msg.exec()
-
-                if msg.clickedButton() == yes_btn:
-                    for ts in self.timers.values():
-                        if ts.name in ct1_times and ct1_times[ts.name] > 0:
-                            ts.elapsed = float(ct1_times[ts.name])
-                            log.info(f"Migrated {ct1_times[ts.name]}s for "
-                                     f"timer '{ts.name}' from CT1")
-            else:
-                QMessageBox.information(
-                    self,
-                    "Welcome to Client Timer 2",
-                    f"Your Client Timer 1 data has been migrated!\n\n"
-                    f"Timers: {timers}\n"
-                    f"Theme: {m.get('Theme', 'E-Ink (Default)')}\n"
-                    f"Size: {m.get('Size', 'Regular')}",
-                )
-            self._state.migrated_from_ct1 = None
-            # Persist immediately — this materializes state.json, so a crash
-            # before the first autosave can't re-run the migration prompt or
-            # lose the user's carry-over choice.
-            self._save_state()
-
-        # 2. Daily reset catch-up — if the app was closed and we missed a
+        # Daily reset catch-up — if the app was closed and we missed a
         #    reset boundary, save the old session and zero out timers.
         if self._state.settings.daily_reset_enabled:
             boundary = self._most_recent_reset_boundary()
@@ -466,8 +407,20 @@ class MainWindow(QMainWindow):
         if self._scroll_area is not None:
             self._scroll_area.verticalScrollBar().setValue(value)
 
+    def _sync_scrub_terms(self):
+        """Tell the crash reporter which strings are client names.
+
+        Without this the redaction in crash.py is inert — it can only remove
+        terms it has been told about.
+        """
+        try:
+            crash.set_scrub_terms([r.get("name", "") for r in self._state.rows])
+        except Exception:
+            pass          # reporting must never be able to break the app
+
     def _rebuild_rows_impl(self):
         """Tear down and recreate the entire grid: client rows + footer."""
+        self._sync_scrub_terms()
         self._widgets.clear()
         self._time_labels = {}   # time QLabel -> rowid, for click-to-copy
         self._name_labels = {}   # name QLabel -> rowid, for dbl-click rename
@@ -1506,6 +1459,7 @@ class MainWindow(QMainWindow):
         row["name"] = new_name
         if row["type"] == "timer" and rowid in self.timers:
             self.timers[rowid].name = new_name
+        self._sync_scrub_terms()
         self._save_state()
         self._try_snapshot(reason="layout_change", priority="medium")
         self._rebuild_rows()

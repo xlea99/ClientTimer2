@@ -1,1 +1,1 @@
-"""Client Timer 1 - A multi-client chess-style timer application."""
+"""Client Timer 2 - A multi-client chess-style timer application."""

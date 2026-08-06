@@ -38,7 +38,6 @@ class ProjectPaths:
     root: Path
     data: Path
     assets: Path
-    old: Path
 
     logs: Path
     current: Path
@@ -67,9 +66,6 @@ class ProjectPaths:
         # Folder for all clienttimer user-specific and session related stuff
         data = ensure_directory(Path(appdata) / "ClientTimer2")
 
-        # The path to the Old ClientTimer1 folder may or may not exist, so we don't enforce it.
-        old = Path(appdata) / "Client Timer 1"
-
         # Folders within the data folder
         logs = ensure_directory(data / "logs")
         current = ensure_directory(data / "current")
@@ -80,7 +76,6 @@ class ProjectPaths:
             root = root,
             data = data,
             assets = assets,
-            old = old,
             logs = logs,
             current = current,
             snapshots = snapshots,

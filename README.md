@@ -31,7 +31,7 @@ And then it **answers that question at scale**.
 
 - **Client-Centric Time Tracking**  
   - Arbitrary number of clients (a.k.a. temporal entities).  
-  - Group them into separators (“Frequent Fliers”, “Verizon”, “The One Project You’re Avoiding”).  
+  - Group them into separators (“Frequent Fliers”, “Escalations”, “The One Project You’re Avoiding”).  
   - View aggregate time per group like a beautiful, unavoidable mirror into your own soul.
 
 - **One-Click Temporal Exclusivity**  
@@ -92,7 +92,7 @@ Everything is visualized with a tiny lock icon that you *will* grow attached to 
 
 - Create **groups** (separators) like:
   - `Frequent Fliers`
-  - `Verizon`
+  - `Escalations`
   - `Random Fires`
 
 - Collapse them to hide child timers when you’re not emotionally prepared to see them.
@@ -160,13 +160,17 @@ What kind of themes will you find? Only everything you could ever possibly want,
 
 - *Galaxy Dark* - "I'm not like the normies. I'm special and I'm different."
 - *A Way* - "When I am actually at my desk, I want my monitor to look like a bee got trapped in it."
-- *Black Herizons* - "Brutalistic reds and blacks that will make you feel like the resident cool guy."
+- *Emergency Calls Only* - "Brutalistic reds and blacks that will make you feel like the resident cool guy."
 - *Single Pane of Glass* - "What if we took a bunch of muted blue client portals and smashed them together, and it was still boring?"
 - *Gray Until Further Notice* - "Gray is the only serious color and I won't let joy prevent that truth."
-- *Telecomm Blues* - "Company pride with just a touch of expense management."
+- *Telecomm Blues* - "Company pride, with just a touch of expense management."
 - *Manila Memories* - "Nostalgia for simpler times."
 - *Park In The Forest* - "It isn't redundant, it's just very serene and green."
 - *T-Magentle* - "Like being verbally abused by the concept of fuchsia."
+- *Per My Last Email* - "Hazard tape, but it arrived in your inbox."
+- *Your Call is Important to Us* - "Soothing, pleasant, and says absolutely nothing."
+- *NOCturnal* - "Turns the whole app into a radar screen."
+- *Busy Signal* - "Your time isn't ticking. It's burning."
 
 All delightfully demonstrated in a live preview, so you don't even have to close the app to get a taste of what you could have if you were only bold enough to commit to your favorite color. 
 
