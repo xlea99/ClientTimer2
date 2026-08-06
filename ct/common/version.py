@@ -15,12 +15,12 @@ An update check is exactly the comparison of those two. Never derive one
 from the other at runtime.
 """
 
-__version__ = "2.3.0"
+__version__ = "2.3.1"
 
 # ISO-8601, and a plain string on purpose: the About page displays it and the
 # manifest carries the same value, so parsing it into a date object here would
 # just mean formatting it back again at every use site.
-RELEASE_DATE = "2026-08-05"
+RELEASE_DATE = "2026-08-06"
 
 
 def version_tuple():
