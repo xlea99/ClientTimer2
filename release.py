@@ -45,6 +45,19 @@ import sys
 from datetime import date
 from pathlib import Path
 
+# Two fixes for running under an IDE or a redirected log rather than a console:
+#   encoding    - Windows falls back to the locale codepage (cp1252) when
+#                 stdout is a pipe, turning every em dash into a replacement
+#                 glyph.
+#   line_buffer - without it, progress lines sit in a buffer and land AFTER
+#                 the subprocess output and the final error, so the run reads
+#                 out of order.
+for _stream in (sys.stdout, sys.stderr):
+    try:
+        _stream.reconfigure(encoding="utf-8", line_buffering=True)
+    except (AttributeError, ValueError):
+        pass
+
 # ===========================================================================
 #  RUN-FROM-IDE CONFIG — fill these in and hit Run. That's the whole ritual.
 # ===========================================================================
@@ -130,12 +143,49 @@ def find_iscc(override=None):
         "from https://jrsoftware.org/isinfo.php, or pass --iscc <path>.")
 
 
+def _porcelain_path(line):
+    """The path out of a `git status --porcelain` line.
+
+    Format is two status characters, a space, then the path. Renames appear
+    as `old -> new`; the new name is the one that matters here.
+    """
+    path = line[3:].strip()
+    if " -> " in path:
+        path = path.split(" -> ", 1)[1]
+    return path.strip('"')
+
+
 def check_clean_tree():
+    """Refuse to build on a dirty tree — except for this file itself.
+
+    release.py is EXPECTED to be modified before every run: the config block
+    at the top is edited in place, which is the whole point of running it
+    from the IDE. Counting that as "uncommitted work you should deal with"
+    would mean the script blocks itself every single time, and the only way
+    out would be --allow-dirty — which would then also be silencing the
+    check for every OTHER file. A guard people are trained to bypass is
+    worse than no guard.
+
+    The trade: real logic changes to release.py are ignored here too. That
+    is acceptable, because the point of this check is protecting the files
+    the script REWRITES (version.py, version.iss, latest.json) so a failed
+    build leaves an obvious diff. It was never about the script's own source.
+    """
     result = subprocess.run(["git", "status", "--porcelain"], cwd=ROOT,
                             capture_output=True, text=True)
     if result.returncode != 0:
         raise ReleaseError("git status failed — is this a git repo?")
-    dirty = [line for line in result.stdout.splitlines() if line.strip()]
+    self_path = Path(__file__).resolve().relative_to(ROOT).as_posix()
+    dirty, ignored_self = [], False
+    for line in result.stdout.splitlines():
+        if not line.strip():
+            continue
+        if _porcelain_path(line) == self_path:
+            ignored_self = True
+            continue
+        dirty.append(line)
+    if ignored_self:
+        print(f"    ({self_path} has uncommitted changes — expected, ignoring)")
     if dirty:
         raise ReleaseError(
             "the working tree has uncommitted changes:\n    "
@@ -234,16 +284,26 @@ def main(argv=None):
     previous = current_version()
     if parse_version(version) <= parse_version(previous):
         raise ReleaseError(
-            f"{version} is not newer than the current {previous}. Releasing a "
-            f"version that is not a bump means nobody is ever prompted for it.")
-    print(f"    {previous} -> {version}")
+            f"{version} is not newer than the current {previous}.\n\n"
+            f"    That {previous} is read from ct/common/version.py, which is\n"
+            f"    THE source of truth — not latest.json. A previous run of this\n"
+            f"    script rewrote it, so resetting the manifest will not clear\n"
+            f"    this. To undo an unwanted release, restore all three files\n"
+            f"    the script writes:\n\n"
+            f"        git checkout HEAD -- ct/common/version.py "
+            f"installer/version.iss latest.json\n\n"
+            f"    Releasing a version that is not a bump means nobody is ever\n"
+            f"    prompted for it.")
+    print(f"    {previous} -> {version}   (from ct/common/version.py)")
 
     if MANIFEST.exists():
         published = json.loads(MANIFEST.read_text(encoding="utf-8")).get("version")
         if published and parse_version(version) <= parse_version(published):
             raise ReleaseError(
                 f"latest.json already advertises {published}, which is not "
-                f"older than {version}.")
+                f"older than {version}.\n\n"
+                f"    This is the secondary guard — the primary one reads "
+                f"ct/common/version.py.")
 
     if not args.allow_dirty:
         check_clean_tree()
