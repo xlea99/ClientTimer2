@@ -5,7 +5,8 @@ import time
 import sys
 from pathlib import Path
 from datetime import datetime, timedelta
-from PySide6.QtCore import Qt, QEvent, QTimer, QPropertyAnimation, QEasingCurve
+from PySide6.QtCore import (Qt, QEvent, QTimer, QPropertyAnimation,
+                            QEasingCurve, Signal)
 from PySide6.QtGui import (QColor, QCursor, QFont, QFontDatabase, QIcon,
                            QKeySequence)
 from PySide6.QtWidgets import (
@@ -31,6 +32,7 @@ from ct.common.logger import log
 from ct.common.setup import PATHS
 from ct.core.config import AppState, save_completed_session
 from ct.core.snapshot import create_snapshot, prune_snapshots
+from ct.core.update import launch_installer as update_launch
 from ct.core.timer_state import TimerState
 from ct.core.undo import (DeleteRow, RenameRow, ReorderRows, ResetTimes,
                           UndoStack)
@@ -40,7 +42,7 @@ from ct.ui.theme import THEMES, SIZES, build_stylesheet, build_menu_stylesheet
 from ct.ui.ui_blueprint import UIBlueprint
 from ct.ui.row_factory import RowFactory
 from ct.ui.widgets import TickCheckBox
-from ct.util import format_time
+from ct.util import format_time, now_iso
 
 # Permissive denylist: real client names use unicode, '&', '-', ',', etc.
 # Only control characters are stripped — name labels render as PlainText so
@@ -78,6 +80,15 @@ _TOAST_CLOSE_W = 18
 # ---------------------------------------------------------------------------
 
 class MainWindow(QMainWindow):
+
+    # Results from the update worker threads come back through these, NOT
+    # through QTimer.singleShot. A QTimer created on a plain threading.Thread
+    # belongs to a thread with no Qt event loop, so it never fires — the work
+    # completes, logs happily, and the result silently evaporates. Signals
+    # are thread-safe and queue onto the receiver's thread, which is the
+    # whole point of them.
+    _update_found = Signal(object)        # manifest dict
+    _update_downloaded = Signal(object)   # Path, or None on failure
 
     def __init__(self):
         # Load state before super().__init__() so we can pass the correct
@@ -191,6 +202,18 @@ class MainWindow(QMainWindow):
         self._toast.setContentsMargins(4, 2, 4, 2)
         self._toast.setWordWrap(True)
         bar_lay.addWidget(self._toast, 1)
+
+        # Optional action, e.g. "Update Now". Hidden for ordinary toasts, so
+        # the common case is exactly the bar it has always been. There is no
+        # matching "Later" button on purpose: the X already means that.
+        self._toast_action = QPushButton()
+        self._toast_action.setFont(QFont("Calibri", 9))
+        self._toast_action.setCursor(Qt.PointingHandCursor)
+        self._toast_action.setVisible(False)
+        self._toast_action.clicked.connect(self._on_toast_action)
+        bar_lay.addWidget(self._toast_action)
+        self._toast_action_cb = None
+
         toast_lay.addWidget(self._toast_bar)
 
         self._toast_opacity = QGraphicsOpacityEffect(self._toast_container)
@@ -217,6 +240,12 @@ class MainWindow(QMainWindow):
             msg = self._pending_toast
             self._pending_toast = None
             QTimer.singleShot(0, lambda: self.show_toast(msg, 6))
+
+        # Update check. Deferred so it never sits in front of the first paint,
+        # and threaded so a slow CDN cannot hold the window hostage.
+        self._update_found.connect(self._offer_update)
+        self._update_downloaded.connect(self._install_update)
+        QTimer.singleShot(2500, self._start_update_check)
 
         # -- Tick timer (1 s) --
         self._tick_n = 0
@@ -2302,11 +2331,16 @@ class MainWindow(QMainWindow):
                            c.minimumSizeHint().height())
         return c.sizeHint().height()
 
-    def show_toast(self, message, seconds=5):
+    def show_toast(self, message, seconds=5, action_text=None, on_action=None):
         """Show a transient notification at the bottom of the window.
 
         `seconds` is how long it stays up before fading; the X dismisses it
-        immediately whatever that was set to.
+        immediately whatever that was set to. `seconds=0` means it does not
+        fade at all — for a toast that asks a question rather than reporting
+        something, since a 2.5s fade means most people never see it.
+
+        `action_text`/`on_action` add a single button. Deliberately one, not
+        two: the X is already "not now".
         """
         # Cancel any in-flight fade so it can't hide the new toast.
         fade, self._toast_fade = self._toast_fade, None
@@ -2327,6 +2361,20 @@ class MainWindow(QMainWindow):
             f" padding: 0px; color: {t['toast_fg']}; }}"
             f"QPushButton:hover {{ background-color: {t['toast_fg']};"
             f" color: {t['toast_bg']}; }}")
+
+        self._toast_action_cb = on_action
+        self._toast_action.setVisible(bool(action_text))
+        if action_text:
+            self._toast_action.setText(f"  {action_text}  ")
+            # Outlined rather than filled: it has to read as a button against
+            # the toast colour without competing with the message.
+            self._toast_action.setStyleSheet(
+                f"QPushButton {{ background: transparent;"
+                f" border: 1px solid {t['toast_fg']}; border-radius: 2px;"
+                f" margin: 2px 4px; padding: 1px 4px;"
+                f" color: {t['toast_fg']}; }}"
+                f"QPushButton:hover {{ background-color: {t['toast_fg']};"
+                f" color: {t['toast_bg']}; }}")
         self._toast_opacity.setOpacity(1.0)
         # Cap the toast at the window's current width so long messages wrap
         # downward instead of widening the window. The X takes its share.
@@ -2336,7 +2384,10 @@ class MainWindow(QMainWindow):
         if avail > 50:
             self._toast.setMaximumWidth(avail)
         self._set_toast_visible(True)
-        self._toast_timer.start(int(seconds * 1000))
+        if seconds > 0:
+            self._toast_timer.start(int(seconds * 1000))
+        else:
+            self._toast_timer.stop()      # stays until dismissed or answered
 
     def _set_toast_visible(self, visible):
         """Show or hide the toast without disturbing the scroll position.
@@ -2363,6 +2414,104 @@ class MainWindow(QMainWindow):
             # Clamps by itself if the list really did get shorter.
             self._scroll_area.verticalScrollBar().setValue(keep)
 
+    # ------------------------------------------------------------------ #
+    #  Updates                                                             #
+    # ------------------------------------------------------------------ #
+
+    def _start_update_check(self):
+        """Look for a newer release on a worker thread.
+
+        Checks on every launch, but only PROMPTS once a day — the check is
+        free and silent, the prompt is the thing with a cost.
+        """
+        import threading
+        from ct.core import update
+
+        def worker():
+            manifest = update.check()
+            if manifest:
+                # Back to the GUI thread. Must be a signal, not a QTimer —
+                # see the class-level comment on _update_found.
+                self._update_found.emit(manifest)
+
+        threading.Thread(target=worker, daemon=True,
+                         name="ct2-update-check").start()
+
+    def _due_for_update_prompt(self):
+        """True if the user has not been shown a prompt in the last 24h.
+
+        Measured from the last PROMPT, not the last check or the last launch.
+        Six restarts in a morning must not mean six prompts, and an app left
+        open all week must still get one.
+        """
+        stamp = self._state.settings.last_update_prompt
+        if not stamp:
+            return True
+        try:
+            last = datetime.fromisoformat(stamp)
+        except (ValueError, TypeError):
+            return True                      # unreadable: treat as never
+        return (datetime.now().astimezone() - last).total_seconds() >= 86400
+
+    def _offer_update(self, manifest):
+        """The one user-visible moment in the whole update path."""
+        if not self._due_for_update_prompt():
+            return
+        version = manifest.get("version", "")
+        self._state.settings.last_update_prompt = now_iso()
+        self._save_state()
+        # seconds=0: this asks a question, so it waits for an answer instead
+        # of fading. The X is "not now" and brings it back tomorrow.
+        self.show_toast(
+            f"Version {version} is available",
+            seconds=0,
+            action_text="Update Now",
+            on_action=lambda: self._do_update(manifest),
+        )
+
+    def _do_update(self, manifest):
+        """Download, then hand off to the installer.
+
+        The download runs on a worker thread — 39 MB on a corporate VPN is
+        not instant, and freezing the UI while it happens would look exactly
+        like a crash.
+        """
+        import threading
+        from ct.core import update
+
+        self.show_toast("Downloading update…", 0)
+
+        def worker():
+            path = update.download(manifest["url"])
+            self._update_downloaded.emit(path)
+
+        threading.Thread(target=worker, daemon=True,
+                         name="ct2-update-download").start()
+
+    def _install_update(self, path):
+        if path is None:
+            self.show_toast("Update download failed — try again later", 6)
+            return
+        # Save BEFORE handing off. Restart Manager closes the app for us, and
+        # relying on closeEvent firing correctly under an RM-initiated close
+        # is not a bet worth taking with the user's times.
+        self._save_state()
+        if not update_launch(path):
+            self.show_toast("Could not start the installer", 6)
+            return
+        self.show_toast("Installing… the app will reopen", 0)
+
+    def _on_toast_action(self):
+        """Run the current toast's action, then clear it.
+
+        The callback is read and cleared BEFORE running, so an action that
+        raises cannot leave a live button wired to a stale handler.
+        """
+        cb, self._toast_action_cb = self._toast_action_cb, None
+        self._dismiss_toast()
+        if cb is not None:
+            cb()
+
     def _fade_toast(self):
         self._toast_fade = QPropertyAnimation(self._toast_opacity, b"opacity")
         self._toast_fade.setDuration(300)
@@ -2379,6 +2528,8 @@ class MainWindow(QMainWindow):
         fade, self._toast_fade = self._toast_fade, None
         if fade is not None:
             fade.stop()
+        self._toast_action_cb = None
+        self._toast_action.setVisible(False)
         if self._toast_container.isVisible():
             self._toast_opacity.setOpacity(1.0)
             self._set_toast_visible(False)

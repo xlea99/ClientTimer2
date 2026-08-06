@@ -1963,6 +1963,84 @@ class TestQtToast(QtWindowTestBase):
 #  6. THEME DATA INTEGRITY                                                      #
 # =========================================================================== #
 
+class TestUpdateCheck(unittest.TestCase):
+    """The update check. Every failure mode must be a silent no-op."""
+
+    def test_version_comparison_is_numeric_not_lexical(self):
+        """'2.10.0' < '2.9.0' as text. That bug hides until release ten."""
+        from ct.core.update import is_newer
+        self.assertTrue(is_newer("2.10.0", "2.9.0"))
+        self.assertTrue(is_newer("3.0.0", "2.99.99"))
+        self.assertTrue(is_newer("2.3.1", "2.3.0"))
+        self.assertFalse(is_newer("2.3.0", "2.3.0"))
+        self.assertFalse(is_newer("2.2.9", "2.3.0"))
+
+    def test_unparseable_versions_never_offer_an_update(self):
+        """A typo'd manifest must be a non-event, not a push to download."""
+        from ct.core.update import is_newer
+        for bad in ("garbage", "2.3", "", None, "2.3.0-beta", "v2.4.0", 3):
+            with self.subTest(version=bad):
+                self.assertFalse(is_newer(bad, "2.3.0"))
+
+    def _with_response(self, payload, status=200):
+        """Fake urlopen returning payload, as a context manager."""
+        import contextlib, io, json as _json
+
+        @contextlib.contextmanager
+        def fake(req, timeout=None):
+            body = payload if isinstance(payload, bytes) else _json.dumps(payload).encode()
+            yield io.BytesIO(body)
+        return patch("urllib.request.urlopen", fake)
+
+    def test_fetch_returns_none_on_every_network_failure(self):
+        """No network, proxy, DNS, 404 — all silent. The user can act on
+        none of them and the app works fine without an update check."""
+        import urllib.error
+        from ct.core.update import fetch_manifest
+        for exc in (urllib.error.URLError("no route"),
+                    urllib.error.HTTPError("u", 404, "Not Found", None, None),
+                    OSError("proxy refused"),
+                    TimeoutError("slow")):
+            with self.subTest(error=type(exc).__name__):
+                with patch("urllib.request.urlopen", side_effect=exc):
+                    self.assertIsNone(fetch_manifest())
+
+    def test_malformed_json_is_none_not_a_crash(self):
+        from ct.core.update import fetch_manifest
+        with self._with_response(b"<html>404</html>"):
+            self.assertIsNone(fetch_manifest())
+
+    def test_json_that_is_not_an_object_is_rejected(self):
+        from ct.core.update import fetch_manifest
+        with self._with_response([1, 2, 3]):
+            self.assertIsNone(fetch_manifest())
+
+    def test_check_returns_none_when_up_to_date(self):
+        from ct.core.update import check
+        from ct.common.version import __version__
+        with self._with_response({"version": __version__,
+                                  "url": "https://example.com/x.exe"}):
+            self.assertIsNone(check())
+
+    def test_check_returns_the_manifest_when_newer(self):
+        from ct.core.update import check
+        payload = {"version": "99.0.0", "url": "https://example.com/x.exe",
+                   "notes": "hi"}
+        with self._with_response(payload):
+            got = check()
+        self.assertIsNotNone(got)
+        self.assertEqual(got["version"], "99.0.0")
+
+    def test_newer_version_with_no_usable_url_is_ignored(self):
+        """Advertising an update the user cannot install is worse than
+        staying quiet — that is a publishing mistake, not their problem."""
+        from ct.core.update import check
+        for bad_url in ("", "ftp://x/y.exe", "http://insecure/x.exe", None):
+            with self.subTest(url=bad_url):
+                with self._with_response({"version": "99.0.0", "url": bad_url}):
+                    self.assertIsNone(check())
+
+
 class TestVersionAndManifest(unittest.TestCase):
     """The build's identity, and the manifest that advertises it.
 

@@ -72,6 +72,11 @@ class Settings:
     snapshot_min_minutes: int  = 5
     show_adjust_buttons:  bool = True
     recover_running_time: bool = True
+    # ISO timestamp of the last time the user was SHOWN an update prompt —
+    # not the last check, and not per launch. Six restarts in a morning must
+    # not mean six prompts, and an app left open for a week must still get
+    # one. Written when the toast appears, whether or not they act on it.
+    last_update_prompt:   str  = ""
 
     @classmethod
     def from_dict(cls, d: dict) -> "Settings":

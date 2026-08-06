@@ -40,6 +40,18 @@ DisableDirPage=yes
 ; Minimum Windows 10
 MinVersion=10.0
 
+; NO AppMutex, deliberately. It was tried and removed: Inno checks the mutex
+; during init, BEFORE Restart Manager runs, so a /SILENT install launched by
+; the in-app updater hit a blocking "please close the app" dialog and hung
+; behind a window the user may never see. Verified, not assumed.
+;
+; Restart Manager handles the same problem better. It closes the app itself
+; instead of demanding the user do it, which is nicer interactively too, and
+; it lets the updater launch Setup without a helper process, a temp batch
+; file, or a guessed delay.
+CloseApplications=yes
+RestartApplications=no
+
 [Languages]
 Name: "english"; MessagesFile: "compiler:Default.isl"
 
@@ -69,7 +81,13 @@ Name: "{userdesktop}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; IconFilen
 Name: "{userstartup}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; Tasks: startupicon
 
 [Run]
+; Interactive install: the usual "Launch Client Timer 2" tickbox.
 Filename: "{app}\{#MyAppExeName}"; Description: "Launch {#MyAppName}"; Flags: nowait postinstall skipifsilent
+
+; Silent install — how the in-app updater invokes Setup. `postinstall` entries
+; NEVER fire under /SILENT, so without this line an auto-update would replace
+; the app and then simply never reopen it.
+Filename: "{app}\{#MyAppExeName}"; Flags: nowait; Check: WizardSilent
 
 [InstallDelete]
 ; Clean slate on reinstall/upgrade — remove old _internal to avoid stale DLLs
