@@ -1,6 +1,15 @@
 """Cut a release: source in, installer + manifest out.
 
-    python release.py 2.4.0 --notes "What changed, in one line."
+Two ways to run it, doing exactly the same thing:
+
+    * Fill in VERSION and NOTES in the config block below and hit Run in the
+      IDE. This is the intended everyday path — a release is a handful of
+      steps you take a few times a year, and retyping a command line each
+      time is friction with no upside.
+    * python release.py 2.4.0 --notes "What changed, in one line."
+
+Passing any command-line argument ignores the config block entirely, so
+neither path is a special case of the other.
 
 WHY THIS EXISTS. The version number used to be typed by hand in five places
 across three files — version.py (twice), the .iss, and latest.json (in
@@ -35,6 +44,26 @@ import subprocess
 import sys
 from datetime import date
 from pathlib import Path
+
+# ===========================================================================
+#  RUN-FROM-IDE CONFIG — fill these in and hit Run. That's the whole ritual.
+# ===========================================================================
+# These are used ONLY when the script is started with no command-line
+# arguments, which is what IntelliJ/PyCharm's green arrow does. Passing any
+# argument on the command line ignores this block entirely, so both ways of
+# running stay honest — same steps, same guards, same order.
+#
+# Leaving a stale VERSION here after a release is harmless: the next run
+# fails on "not newer than the current X" before it writes anything.
+
+VERSION = ""        # e.g. "2.4.0"
+NOTES = ""          # one line, shown in the update toast
+
+SKIP_TESTS = False  # don't fucking do it
+ALLOW_DIRTY = False # build with uncommitted changes present (DON'T DO IT)
+ISCC_PATH = None    # path to ISCC.exe, if it isn't in the usual place
+
+# ===========================================================================
 
 ROOT = Path(__file__).resolve().parent
 VERSION_PY = ROOT / "ct" / "common" / "version.py"
@@ -149,18 +178,50 @@ def write_version_iss(version):
         encoding="utf-8")
 
 
+def resolve_config(argv):
+    """Settings from the command line, or from the block at the top of the file.
+
+    argparse is only consulted when arguments were actually passed. It cannot
+    run first and fall back afterwards: `--notes` is required, so a bare
+    `python release.py` would die inside argparse before the IDE block ever
+    got a look in.
+    """
+    if argv:
+        parser = argparse.ArgumentParser(
+            description="Build a Client Timer 2 release and its manifest.")
+        parser.add_argument("version", help="the new version, e.g. 2.4.0")
+        parser.add_argument("--notes", required=True,
+                            help="one-line summary shown in the update toast")
+        parser.add_argument("--skip-tests", action="store_true",
+                            help="skip the test suite (don't)")
+        parser.add_argument("--allow-dirty", action="store_true",
+                            help="build with uncommitted changes present")
+        parser.add_argument("--iscc",
+                            help="path to ISCC.exe if not in the usual place")
+        return parser.parse_args(argv)
+
+    if not VERSION.strip() or not NOTES.strip():
+        raise ReleaseError(
+            "nothing to release.\n\n"
+            "    Running with no arguments uses the config block at the top of\n"
+            f"    {Path(__file__).name}. Set both:\n\n"
+            '        VERSION = "2.4.0"\n'
+            '        NOTES   = "What changed, in one line."\n\n'
+            "    Or pass them on the command line instead:\n"
+            '        python release.py 2.4.0 --notes "..."')
+
+    return argparse.Namespace(
+        version=VERSION, notes=NOTES, skip_tests=SKIP_TESTS,
+        allow_dirty=ALLOW_DIRTY, iscc=ISCC_PATH)
+
+
 def main(argv=None):
-    parser = argparse.ArgumentParser(
-        description="Build a Client Timer 2 release and its manifest.")
-    parser.add_argument("version", help="the new version, e.g. 2.4.0")
-    parser.add_argument("--notes", required=True,
-                        help="one-line summary shown in the update toast")
-    parser.add_argument("--skip-tests", action="store_true",
-                        help="skip the test suite (don't)")
-    parser.add_argument("--allow-dirty", action="store_true",
-                        help="build with uncommitted changes present")
-    parser.add_argument("--iscc", help="path to ISCC.exe if not in the usual place")
-    args = parser.parse_args(argv)
+    if argv is None:
+        argv = sys.argv[1:]
+    args = resolve_config(argv)
+    if not argv:
+        print(f"Reading the config block in {Path(__file__).name} "
+              f"(no arguments passed).", flush=True)
 
     version = args.version.strip().lstrip("v")
     total = 8
@@ -240,7 +301,7 @@ def main(argv=None):
             "released": released,
             "url": url,
             "sha256": digest,
-            "notes": args.notes,
+            "notes": args.notes.strip(),
         }, indent=2) + "\n", encoding="utf-8")
     print(f"    {url}")
 
@@ -261,7 +322,7 @@ def main(argv=None):
     Step 3 is what arms the update for everyone, so it goes last. Pushing
     latest.json before the asset exists tells every running app to download
     a file that is not there.
-""")
+""", flush=True)
     return 0
 
 
