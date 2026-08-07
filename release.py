@@ -70,9 +70,9 @@ for _stream in (sys.stdout, sys.stderr):
 # fails on "not newer than the current X" before it writes anything.
 
 VERSION = "2.3.0"        # e.g. "2.4.0"
-NOTES = "Unbelievable, cancer-curing update"          # one line, shown in the update toast
+NOTES = "UI and usability update"          # one line, shown in the update toast
 
-REBUILD = False     # re-cut a version that is ALREADY the current one
+REBUILD = True     # re-cut a version that is ALREADY the current one
 SKIP_TESTS = False  # don't fucking do it
 ALLOW_DIRTY = False # build with uncommitted changes present (DON'T DO IT)
 ISCC_PATH = None    # path to ISCC.exe, if it isn't in the usual place

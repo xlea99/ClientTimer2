@@ -1,6 +1,7 @@
 {
   "version": "2.3.0",
-  "released": "2026-08-05",
+  "released": "2026-08-06",
   "url": "https://github.com/xlea99/ClientTimer2/releases/download/2.3.0/ClientTimer2_Setup_2.3.0.exe",
-  "notes": "One Start/Stop button instead of two, row hover highlighting, automatic updates, and a pile of theme work."
+  "sha256": "bf017585d45de608d9e27559d304ed3aa8e865d76812eebd915ef54967814fc1",
+  "notes": "UI and usability update"
 }
