@@ -3154,7 +3154,8 @@ class TestThemeSizes(unittest.TestCase):
 
     REQUIRED_KEYS = ["label", "time", "action", "padding", "frame_pad",
                      "h_spacing", "v_spacing", "line_gap", "footer_gap",
-                     "scrollbar_gap", "footer_line_gap"]
+                     "scrollbar_gap", "footer_line_gap",
+                     "btn_pad", "name_pad", "row_pad"]
 
     def test_all_sizes_have_required_keys(self):
         from ct.ui.theme.sizes import SIZES

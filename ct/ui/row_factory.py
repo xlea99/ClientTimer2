@@ -15,6 +15,44 @@ from ct.core.timer_state import TimerState
 from ct.ui.ui_blueprint import UIBlueprint
 from ct.util import format_time
 
+
+class FooterStack(QStackedWidget):
+    """Height is the max over all pages. Width follows the CURRENT page.
+
+    QStackedWidget normally reports the max over EVERY page in both
+    directions. The height half of that is deliberate and load-bearing: it
+    is what keeps the footer exactly one line tall in both lock states, and
+    footer height feeds `chrome`, which decides how many whole rows the
+    viewport snaps to.
+
+    The width half was never wanted and was quietly setting the window's
+    minimum width from a page nobody could see. The hidden edit page —
+    "Add Client", "Add Separator" and the name input — hinted ~496px while
+    the visible status line needed ~154px, so a locked window was hundreds
+    of pixels wider than anything in it. The rows did not shrink to match
+    either: the adjust-button container has a Preferred policy, so it
+    expanded to swallow the slack, which is what surfaced as a huge unused
+    gap in each row.
+
+    Worst at the small size presets, because that 496px is button text plus
+    style padding and barely scales — so at Compact it dominated, and
+    Regular genuinely used its width better than Compact did.
+    """
+
+    def sizeHint(self):
+        hint = super().sizeHint()
+        page = self.currentWidget()
+        if page is not None:
+            hint.setWidth(page.sizeHint().width())
+        return hint
+
+    def minimumSizeHint(self):
+        hint = super().minimumSizeHint()
+        page = self.currentWidget()
+        if page is not None:
+            hint.setWidth(page.minimumSizeHint().width())
+        return hint
+
 # Purely organizational class to group functions to build new rows (timers, separators, and the footer) in the main
 # view. Each builder returns a (container, widget_dict) tuple.  The container is a QWidget with objectName "rowBg"
 # that can be inserted into the grid. The widget_dict maps logical names to sub-widgets for later updates.
@@ -64,7 +102,10 @@ class RowFactory:
             f" background-color: {blueprint.theme['group_hover_bg']};"
             f" border-color: {blueprint.theme['group_hover_line']}; }}")
         row_container_layout = QHBoxLayout(row_container)
-        row_container_layout.setContentsMargins(3, 3, 3, 3)
+        # Per-size; was a flat 3 on all presets. Timer rows were already
+        # size-driven (0, 0, 0, line_gap) — only group headers were not.
+        _rp = blueprint.size.get("row_pad", 3)
+        row_container_layout.setContentsMargins(_rp, _rp, _rp, _rp)
         row_container_layout.setSpacing(blueprint.h_spacing)
 
         # Col 0: toggle
@@ -363,7 +404,9 @@ class RowFactory:
         # either page grows into. Toggling the lock must never change the
         # window's height — footer height feeds `chrome`, and `chrome` decides
         # how many whole rows the viewport snaps to.
-        middle = QStackedWidget()
+        # FooterStack, not QStackedWidget: same max-height-over-pages
+        # behaviour, but width follows the visible page. See the class.
+        middle = FooterStack()
         # Fixed vertically or the stack expands and the footer soaks up every
         # spare pixel in the column. One line, always — that slack belongs to
         # the row viewport.

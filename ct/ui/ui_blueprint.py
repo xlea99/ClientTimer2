@@ -52,8 +52,12 @@ class UIBlueprint:
         # the widest or it would resize under the cursor every time a
         # timer starts — and a row that changes width re-lays-out the grid.
         _fm_time = QFontMetrics(time_font)
-        start_min_w = max(_fm_time.horizontalAdvance(lbl)
-                          for lbl in ("Start", "Stop", "Add")) + 20
+        # Per-size, not a flat +20: that constant did not shrink with the
+        # preset, so it was ~2x the proportional weight at Microscopic that
+        # it was at Gargantuan. See sizes.py.
+        start_min_w = (max(_fm_time.horizontalAdvance(lbl)
+                           for lbl in ("Start", "Stop", "Add"))
+                       + size.get("btn_pad", 20))
 
         bold_label = QFont(font_family, size["label"])
         bold_label.setBold(True)
@@ -64,7 +68,7 @@ class UIBlueprint:
             display_names = [r["name"] for r in rows]
             min_name_w = max(
                 fm_label.horizontalAdvance(dn) for dn in display_names
-            ) + indent_px + 4
+            ) + indent_px + size.get("name_pad", 4)
         else:
             min_name_w = 80
 

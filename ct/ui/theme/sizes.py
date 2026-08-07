@@ -1,6 +1,20 @@
 # Size presets for the UI.
+#
+# btn_pad / name_pad / row_pad are WIDTH knobs, added because three pixel
+# constants used to bypass this table entirely: a flat +20 on the toggle
+# button, +4 on the name column, and a 3px inset on group rows. Everything
+# else halved as the preset shrank; those did not, so the fixed share of a
+# row went from ~11% at Gargantuan to ~24% at Microscopic. Small presets
+# ended up claiming width they had no text to fill, which made Compact read
+# as LESS dense than Regular.
+#
+# Regular holds the original 20/4/3 exactly, so the default preset is
+# unchanged. The rest scale with the label font, trimmed at the small end.
 SIZES = {
     "Microscopic": {
+        "btn_pad": 16,
+        "name_pad": 2,
+        "row_pad": 1,
         "label": 9,
         "time": 7,
         "action": 6,
@@ -14,6 +28,9 @@ SIZES = {
         "footer_line_gap": 1,
     },
     "Tiny": {
+        "btn_pad": 16,
+        "name_pad": 2,
+        "row_pad": 2,
         "label": 10,
         "time": 8,
         "action": 7,
@@ -27,6 +44,9 @@ SIZES = {
         "footer_line_gap": 2,
     },
     "Compact": {
+        "btn_pad": 16,
+        "name_pad": 3,
+        "row_pad": 2,
         "label": 12,
         "time": 10,
         "action": 8,
@@ -40,6 +60,9 @@ SIZES = {
         "footer_line_gap": 3,
     },
     "Regular": {
+        "btn_pad": 20,
+        "name_pad": 4,
+        "row_pad": 3,
         "label": 14,
         "time": 12,
         "action": 9,
@@ -53,6 +76,9 @@ SIZES = {
         "footer_line_gap": 4,
     },
     "Bulky": {
+        "btn_pad": 23,
+        "name_pad": 5,
+        "row_pad": 3,
         "label": 16,
         "time": 14,
         "action": 11,
@@ -66,6 +92,9 @@ SIZES = {
         "footer_line_gap": 5,
     },
     "Colossal": {
+        "btn_pad": 26,
+        "name_pad": 5,
+        "row_pad": 4,
         "label": 18,
         "time": 16,
         "action": 13,
@@ -79,6 +108,9 @@ SIZES = {
         "footer_line_gap": 6,
     },
     "Gargantuan": {
+        "btn_pad": 32,
+        "name_pad": 7,
+        "row_pad": 5,
         "label": 22,
         "time": 20,
         "action": 18,

@@ -2426,6 +2426,16 @@ class MainWindow(QMainWindow):
             # and kept for _maximize_height, so it never re-derives its own.
             chrome = (hint.height() - self._scroll_area.sizeHint().height()
                       + extra_h)
+            # The same cap applies HORIZONTALLY, and used to be masked: the
+            # footer stack reported the width of its widest page, including
+            # the hidden edit controls, which happened to exceed the grid at
+            # every size. Once the footer started reporting only the visible
+            # page, nothing was left to cover the under-report and the window
+            # came out narrower than its own rows. Measure the real grid.
+            w_chrome = (hint.width() - self._scroll_area.sizeHint().width()
+                        + extra_w)
+            want_w = max(want_w,
+                         self._grid_widget.sizeHint().width() + w_chrome)
             # A toast is additive: the window grows downward to carry it
             # rather than the rows giving up space for it. So the ceiling
             # governs everything EXCEPT the toast, and the toast's height is
