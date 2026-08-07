@@ -72,6 +72,7 @@ for _stream in (sys.stdout, sys.stderr):
 VERSION = "2.3.0"        # e.g. "2.4.0"
 NOTES = "Unbelievable, cancer-curing update"          # one line, shown in the update toast
 
+REBUILD = False     # re-cut a version that is ALREADY the current one
 SKIP_TESTS = False  # don't fucking do it
 ALLOW_DIRTY = False # build with uncommitted changes present (DON'T DO IT)
 ISCC_PATH = None    # path to ISCC.exe, if it isn't in the usual place
@@ -242,6 +243,9 @@ def resolve_config(argv):
         parser.add_argument("version", help="the new version, e.g. 2.4.0")
         parser.add_argument("--notes", required=True,
                             help="one-line summary shown in the update toast")
+        parser.add_argument("--rebuild", action="store_true",
+                            help="re-cut the CURRENT version instead of "
+                                 "bumping (see the notes in check_version)")
         parser.add_argument("--skip-tests", action="store_true",
                             help="skip the test suite (don't)")
         parser.add_argument("--allow-dirty", action="store_true",
@@ -262,7 +266,7 @@ def resolve_config(argv):
 
     return argparse.Namespace(
         version=VERSION, notes=NOTES, skip_tests=SKIP_TESTS,
-        allow_dirty=ALLOW_DIRTY, iscc=ISCC_PATH)
+        allow_dirty=ALLOW_DIRTY, iscc=ISCC_PATH, rebuild=REBUILD)
 
 
 def main(argv=None):
@@ -282,7 +286,30 @@ def main(argv=None):
     # --- 1. Checks that must happen before anything is written -------------
     step(1, total, "Checking the version and the working tree")
     previous = current_version()
-    if parse_version(version) <= parse_version(previous):
+    if args.rebuild:
+        # Re-cutting a version that is already current. Legitimate when the
+        # build went out wrong, or was never distributed and has since been
+        # superseded by more work under the same number.
+        #
+        # It relaxes ONLY the bump check, and only for the exact current
+        # version — a typo'd rebuild target is still an error, and the
+        # already-published check below is still enforced against a version
+        # OLDER than this one.
+        #
+        # THE COST, which is why it is opt-in: anyone already running this
+        # version will never be offered the new build. Same number means the
+        # updater has nothing to compare, so they sit on the old bytes
+        # forever. Only rebuild a version you know nobody is running.
+        if parse_version(version) != parse_version(previous):
+            raise ReleaseError(
+                f"--rebuild re-cuts the CURRENT version, but {version} is not "
+                f"{previous}.\n\n"
+                f"    Set the version to {previous} to rebuild it, or drop "
+                f"--rebuild to release {version} as a bump.")
+        print(f"    REBUILD: re-cutting {version} (not a bump)")
+        print(f"    Anyone already on {version} will NOT be offered this "
+              f"build — same version, nothing to compare.")
+    elif parse_version(version) <= parse_version(previous):
         raise ReleaseError(
             f"{version} is not newer than the current {previous}.\n\n"
             f"    That {previous} is read from ct/common/version.py, which is\n"
@@ -293,12 +320,20 @@ def main(argv=None):
             f"        git checkout HEAD -- ct/common/version.py "
             f"installer/version.iss latest.json\n\n"
             f"    Releasing a version that is not a bump means nobody is ever\n"
-            f"    prompted for it.")
+            f"    prompted for it.\n\n"
+            f"    Re-cutting {previous} on purpose? Use --rebuild, or set "
+            f"REBUILD = True in the config block.")
     print(f"    {previous} -> {version}   (from ct/common/version.py)")
 
     if MANIFEST.exists():
         published = json.loads(MANIFEST.read_text(encoding="utf-8")).get("version")
-        if published and parse_version(version) <= parse_version(published):
+        # Under --rebuild the manifest is EXPECTED to already name this
+        # version; that is the whole point. Going BACKWARDS is still wrong
+        # either way, so the check relaxes from <= to < rather than off.
+        too_old = (parse_version(version) < parse_version(published)
+                   if args.rebuild
+                   else parse_version(version) <= parse_version(published))
+        if published and too_old:
             raise ReleaseError(
                 f"latest.json already advertises {published}, which is not "
                 f"older than {version}.\n\n"
@@ -366,15 +401,29 @@ def main(argv=None):
     print(f"    {url}")
 
     step(8, total, "Done — the rest is manual, in this order")
+    if args.rebuild:
+        # A rebuild has an extra step a normal release does not, and it is
+        # the easy one to skip: the release ALREADY EXISTS with an asset on
+        # it. Uploading beside the old file leaves two, and the sha256 just
+        # written matches only one of them.
+        step_two = f"""2. The `{version}` release already exists. Open it, DELETE the old
+       asset, then upload the new one:
+           {installer}
+       https://github.com/{REPO}/releases/tag/{version}
+
+       Do not leave both. latest.json now carries a sha256 that matches
+       ONLY the file above, so the wrong asset fails every download."""
+    else:
+        step_two = f"""2. Create the GitHub release, tag *exactly* `{version}`, and upload:
+           {installer}
+       https://github.com/{REPO}/releases/new"""
     print(f"""
     The build is finished and nothing has left this machine yet.
 
-    1. Commit the version bump:
+    1. Commit:
            git add -A && git commit -m "Release {version}"
 
-    2. Create the GitHub release, tag *exactly* `{version}`, and upload:
-           {installer}
-       https://github.com/{REPO}/releases/new
+    {step_two}
 
     3. Only once that asset is live, push:
            git push
