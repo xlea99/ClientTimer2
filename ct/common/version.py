@@ -20,7 +20,7 @@ __version__ = "2.3.0"
 # ISO-8601, and a plain string on purpose: the About page displays it and the
 # manifest carries the same value, so parsing it into a date object here would
 # just mean formatting it back again at every use site.
-RELEASE_DATE = "2026-08-06"
+RELEASE_DATE = "2026-08-07"
 
 
 def version_tuple():
