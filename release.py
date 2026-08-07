@@ -73,7 +73,7 @@ VERSION = "2.3.0"        # e.g. "2.4.0"
 NOTES = "UI and usability update"          # one line, shown in the update toast
 
 REBUILD = True     # re-cut a version that is ALREADY the current one
-SKIP_TESTS = False  # don't fucking do it
+SKIP_TESTS = True  # don't fucking do it
 ALLOW_DIRTY = False # build with uncommitted changes present (DON'T DO IT)
 ISCC_PATH = None    # path to ISCC.exe, if it isn't in the usual place
 

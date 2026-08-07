@@ -12,7 +12,7 @@
 # unchanged. The rest scale with the label font, trimmed at the small end.
 SIZES = {
     "Microscopic": {
-        "btn_pad": 16,
+        "btn_pad": 18,
         "name_pad": 2,
         "row_pad": 1,
         "label": 9,
@@ -28,7 +28,7 @@ SIZES = {
         "footer_line_gap": 1,
     },
     "Tiny": {
-        "btn_pad": 16,
+        "btn_pad": 18,
         "name_pad": 2,
         "row_pad": 2,
         "label": 10,
@@ -44,7 +44,7 @@ SIZES = {
         "footer_line_gap": 2,
     },
     "Compact": {
-        "btn_pad": 16,
+        "btn_pad": 18,
         "name_pad": 3,
         "row_pad": 2,
         "label": 12,
