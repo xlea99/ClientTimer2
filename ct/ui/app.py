@@ -6,7 +6,7 @@ import sys
 from pathlib import Path
 from datetime import datetime, timedelta
 from PySide6.QtCore import (Qt, QEvent, QTimer, QPropertyAnimation,
-                            QEasingCurve, Signal)
+                            QEasingCurve, QSharedMemory, Signal)
 from PySide6.QtGui import (QColor, QCursor, QFont, QFontDatabase, QIcon,
                            QKeySequence)
 from PySide6.QtWidgets import (
@@ -2869,11 +2869,70 @@ class MainWindow(QMainWindow):
 # Entry point
 # ---------------------------------------------------------------------------
 
+# One key, one running app. QSharedMemory rather than QLocalServer because
+# the PyInstaller spec EXCLUDES PySide6.QtNetwork — a QLocalServer guard
+# would work perfectly from source and vanish in the shipped exe, which is
+# the worst possible place to find out.
+_INSTANCE_KEY = "ClientTimer2-single-instance"
+
+
+def _claim_single_instance():
+    """Hold the instance key, or return None if another app already has it.
+
+    The caller must keep the returned object alive: releasing it frees the
+    key. Windows reclaims a shared-memory segment when its last process
+    dies, so a crash cannot leave a stale lock that shuts everyone out.
+
+    FAILS OPEN. Any unexpected error hands back a claim rather than
+    refusing to start — a timer that will not open is a worse bug than two
+    timers that do.
+    """
+    shm = QSharedMemory(_INSTANCE_KEY)
+    if shm.create(1):
+        return shm
+    if shm.error() == QSharedMemory.AlreadyExists:
+        return None
+    log.warning(f"Single-instance check failed ({shm.errorString()}); "
+                f"starting anyway.")
+    return shm
+
+
+def _raise_existing_window():
+    """Bring the already-running copy to the front, best effort.
+
+    ctypes rather than Qt: the running instance is a different process, so
+    there is no Qt object here to raise. Silent on failure — the user asked
+    for their timer, and the one thing that must not happen is a second
+    window appearing anyway.
+    """
+    try:
+        import ctypes
+        user32 = ctypes.windll.user32
+        hwnd = user32.FindWindowW(None, "Client Timer 2")
+        if hwnd:
+            user32.ShowWindow(hwnd, 9)          # SW_RESTORE, un-minimises
+            user32.SetForegroundWindow(hwnd)
+    except Exception:
+        log.info("Could not raise the running window.", exc_info=True)
+
+
 def main():
     app = QApplication(sys.argv)
+    # Before anything is built. Five copies all rewriting state.json every
+    # 20 ticks is last-writer-wins on the user's tracked time — which is
+    # exactly what happens when a slow machine tempts someone into clicking
+    # the icon repeatedly.
+    guard = _claim_single_instance()
+    if guard is None:
+        log.info("Another Client Timer is already running; raising it.")
+        _raise_existing_window()
+        return 0
     # No setStyle() — the platform default stays. Forcing Fusion was tried
     # and reverted: it fixed combo-popup chrome but restyled every native
     # widget in the app, which was a far bigger change than the problem.
     window = MainWindow()
+    # Parented to the window so the key is held for exactly as long as the
+    # app is up, and released when it goes.
+    window._instance_guard = guard
     window.show()
     sys.exit(app.exec())
