@@ -31,11 +31,11 @@ def _coerce_setting(key, value, default):
         if isinstance(value, bool):
             return value, False
         if isinstance(value, int) and value in (0, 1):
-            log.warning(f"Setting '{key}' was {value} — read as {bool(value)}.")
+            log.warning(f"Setting '{key}' was {value} - read as {bool(value)}.")
             return bool(value), True
         if isinstance(value, str) and value.strip().lower() in ("true", "false", "1", "0"):
             result = value.strip().lower() in ("true", "1")
-            log.warning(f"Setting '{key}' was '{value}' (text) — read as {result}.")
+            log.warning(f"Setting '{key}' was '{value}' (text) - read as {result}.")
             return result, True
     elif target is int:
         if isinstance(value, int) and not isinstance(value, bool):
@@ -43,14 +43,14 @@ def _coerce_setting(key, value, default):
         if isinstance(value, (str, float)):
             try:
                 result = int(float(value))
-                log.warning(f"Setting '{key}' was {value!r} — read as {result}.")
+                log.warning(f"Setting '{key}' was {value!r} - read as {result}.")
                 return result, True
             except (ValueError, OverflowError):
                 pass
     elif target is str:
         if isinstance(value, str):
             return value, False
-    log.warning(f"Setting '{key}' was {value!r}, which couldn't be interpreted — reset to default {default!r}.")
+    log.warning(f"Setting '{key}' was {value!r}, which couldn't be interpreted - reset to default {default!r}.")
     return default, True
 
 
@@ -72,7 +72,13 @@ class Settings:
     snapshot_min_minutes: int  = 5
     show_adjust_buttons:  bool = True
     recover_running_time: bool = True
-    # ISO timestamp of the last time the user was SHOWN an update prompt —
+    # What a copy puts on the clipboard. The row on screen is always
+    # HH:MM:SS; this is only the copy, because a time is READ on screen and
+    # PASTED somewhere else, and those want different things. Defaults to
+    # HH:MM because that is what the timesheet system on the other end
+    # expects - the seconds were being deleted by hand every time.
+    copy_format:          str  = "HH:MM"
+    # ISO timestamp of the last time the user was SHOWN an update prompt -
     # not the last check, and not per launch. Six restarts in a morning must
     # not mean six prompts, and an app left open for a week must still get
     # one. Written when the toast appears, whether or not they act on it.
@@ -91,22 +97,47 @@ class Settings:
             else:
                 values[k] = default
         obj = cls(**values)
-        # Plain attribute, not a field — never serialized by to_dict().
+        # Plain attribute, not a field - never serialized by to_dict().
         # MainWindow reads this at startup to toast the user about it.
         obj.coerced_keys = coerced
         return obj
 
+    # Themes that were RENAMED, old name -> new name.
+    #
+    # A rename is not a retirement, which is why this exists when the
+    # retired-theme case deliberately does not (see AppState.load). A
+    # retired theme is gone: falling back to the default costs the user one
+    # re-pick of something that no longer exists either way. A renamed theme
+    # is still right there in the list, looking identical - silently
+    # resetting them off it is a loss with nothing gained.
+    #
+    # Entries stay FOREVER. This is the only record of a name that a user's
+    # state.json may still hold, and an install can sit unopened for months.
+    _THEME_RENAMES = {
+        "T-Magentle": "T-Magenta",      # renamed 2026-08-06
+        # Capitalisation only ("is" -> "Is"). Invisible in the UI, and a
+        # completely different string to state.json — which is exactly why
+        # it needs an entry: nothing about it LOOKS like a rename.
+        "Your Call is Important to Us": "Your Call Is Important to Us",
+    }
+
     @staticmethod
     def _migrate(d: dict) -> dict:
         """Rewrite settings saved by an older version into current keys."""
-        if "button_visibility" not in d:
+        renamed = Settings._THEME_RENAMES.get(d.get("theme"))
+        old_buttons = "button_visibility" in d
+        if not renamed and not old_buttons:
             return d
-        # The X button used to be user-configurable ("All" / "Adjust Only" /
-        # "None"); it now appears only in edit mode, so all that survives is
-        # whether the +5/-5 pair is shown.
         d = dict(d)
-        d.setdefault("show_adjust_buttons", d.pop("button_visibility") != "None")
-        d.pop("button_visibility", None)
+        if renamed:
+            d["theme"] = renamed
+        if old_buttons:
+            # The X button used to be user-configurable ("All" / "Adjust
+            # Only" / "None"); it now appears only in edit mode, so all that
+            # survives is whether the +5/-5 pair is shown.
+            d.setdefault("show_adjust_buttons",
+                         d.pop("button_visibility") != "None")
+            d.pop("button_visibility", None)
         return d
 
     def to_dict(self) -> dict:
@@ -118,7 +149,7 @@ _SETTINGS_DEFAULTS = {f.name: f.default for f in dataclasses.fields(Settings)}
 
 
 # ---------------------------------------------------------------------------
-# AppState — runtime holder for the full session state
+# AppState - runtime holder for the full session state
 # ---------------------------------------------------------------------------
 
 class AppState:
@@ -157,8 +188,8 @@ class AppState:
     def __init__(self, settings: Settings, rows: list, collapsed_groups: set,
                  session_start: datetime, tracked_times: dict):
         self.settings         = settings
-        self.rows             = rows              # live list — mutated in place by MainWindow
-        self.collapsed_groups = collapsed_groups  # live set — mutated in place by MainWindow
+        self.rows             = rows              # live list, mutated in place by MainWindow
+        self.collapsed_groups = collapsed_groups  # live set mutated in place by MainWindow
         self.session_start    = session_start
         self.tracked_times    = tracked_times     # used only during MainWindow.__init__
         self.window_height    = 0                 # user's height ceiling; 0 = auto-fit
@@ -171,7 +202,7 @@ class AppState:
             entry = {"elapsed": ts.elapsed}
             if ts.running:
                 # freeze() above makes elapsed current as of this save, so the
-                # recovery baseline is the save moment — using started_at here
+                # recovery baseline is the save moment, using started_at here
                 # would double-count everything between start and last save.
                 entry["running_since"] = now_iso()
             tracked[str(rid)] = entry
@@ -279,10 +310,12 @@ class AppState:
 
         # Hydrate the validated dict into typed fields
         settings  = Settings.from_dict(state["settings"])
-        # No theme-rename map. A saved theme that no longer exists falls
-        # back to the default at render time; the cost is one person
-        # re-picking a theme, which is not worth carrying retired names in
-        # the source forever.
+        # RETIRED themes are not tracked: a saved theme that no longer
+        # exists falls back to the default at render time, and the cost is
+        # one person re-picking something that is gone either way. RENAMED
+        # themes ARE tracked, in Settings._THEME_RENAMES — that theme still
+        # exists and looks the same, so resetting them off it loses them
+        # something for no reason.
         rows      = list(state["layout"]["rows"])
         collapsed = set(state["layout"]["collapsed_groups"])
         try:

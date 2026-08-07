@@ -121,7 +121,7 @@ def init():
         import sentry_sdk
         from sentry_sdk.integrations.logging import LoggingIntegration
     except ImportError:
-        log.warning("sentry_sdk not available — crash reporting disabled.")
+        log.warning("sentry_sdk not available - crash reporting disabled.")
         return
 
     frozen = getattr(sys, "frozen", False)

@@ -4,11 +4,21 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 from PySide6.QtCore import Qt, QEvent, QTimer
-from PySide6.QtGui import QFont, QFontMetrics
-from PySide6.QtWidgets import QApplication
+from PySide6.QtGui import QColor, QFont, QFontMetrics
+from PySide6.QtWidgets import QApplication, QGraphicsDropShadowEffect
 
 if TYPE_CHECKING:
     from ct.ui.app import MainWindow
+
+
+def _luma(hex_color):
+    """Rec. 709 luma, 0-255. Used only to decide dark vs light."""
+    h = str(hex_color).lstrip("#")
+    try:
+        r, g, b = (int(h[i:i + 2], 16) for i in (0, 2, 4))
+    except (ValueError, IndexError):
+        return 128
+    return 0.2126 * r + 0.7152 * g + 0.0722 * b
 
 
 class DragController:
@@ -36,6 +46,106 @@ class DragController:
     @property
     def active(self):
         return self.dragging_rid is not None
+
+    # -- "Lifted off the page" elevation for the row under the cursor -- #
+
+    def _lift(self):
+        """Shadow the dragged row and raise it above its neighbours.
+
+        A graphics effect rather than anything in the stylesheet, because Qt
+        stylesheets have no box-shadow and every alternative that DOES exist
+        (a border, padding, a size change) alters the row's geometry. Row
+        height is load-bearing here — `_snapped_height` and `_scroll_by_rows`
+        both assume one uniform pitch — so the lift must be purely painted.
+        QGraphicsEffect is exactly that: it changes what is drawn and nothing
+        about what the layout thinks is there.
+
+        It also blurs the SOURCE'S ALPHA, not the widget rect, so an indented
+        child row (whose background is inset by a stylesheet margin) casts a
+        correctly inset shadow for free. No coordinate maths needed.
+
+        Idempotent on purpose. `_reorder_visual` reuses containers, so the
+        effect survives a reorder and only needs re-raising — but it falls
+        back to a full `_rebuild_rows()` when a row is missing, which builds
+        NEW containers and drops the effect with the old ones. Calling this
+        after every reorder covers both paths at the cost of one attribute
+        read in the common case.
+        """
+        h = self.host
+        w = h._widgets.get(self.dragging_rid)
+        container = w.get("container") if w else None
+        if container is None:
+            return
+        if container.graphicsEffect() is None:
+            container.setGraphicsEffect(self._make_shadow(container))
+        # Re-raised every time: _reorder_visual removes and re-inserts every
+        # container, which resets stacking order. Without this the shadow is
+        # painted over by the very rows it is supposed to fall on.
+        container.raise_()
+        # ...but the gap-fill strip must then go back on top of it. The strip
+        # is a SIBLING widget occupying the spacing directly above the row,
+        # painted to read as part of it. The shadow blurs upward across
+        # exactly that band, so with the row raised above the strip the fill
+        # gets a dark gradient laid over it and the join shows as a hard
+        # seam between the row and its extension.
+        #
+        # Re-placing rather than just re-raising, and it has to happen HERE,
+        # after the effect exists: _place_hover_strip sizes its one-pixel
+        # overlap from whether the row carries an effect, and every caller
+        # syncs the strip BEFORE this method attaches one. It ends by raising
+        # the strip, so this covers both jobs.
+        h._sync_drag_strip()
+
+    def _make_shadow(self, parent):
+        """A shadow on light themes, a halo on dark ones.
+
+        Black on near-black is invisible no matter the alpha, which is why
+        dark UIs signal elevation with a light rim instead of a cast shadow.
+        Picking by luma means this works across all 21 themes without any of
+        them carrying a new colour key.
+        """
+        from ct.ui.theme import THEMES
+        t = THEMES.get(self.host._state.settings.theme, THEMES["E-Ink (Default)"])
+        effect = QGraphicsDropShadowEffect(parent)
+        if _luma(t["app_bg"]) < 128:
+            # A RIM, not a wash. The first version used the light-theme
+            # thinking — wide and faint — and it does not survive on a dark
+            # surface: a shadow gets to darken something, but a glow has to
+            # ADD light, and spreading 27% opacity over a 26px blur leaves
+            # nothing bright enough anywhere to read as an edge. Tight and
+            # strong instead, which is how dark UIs signal elevation.
+            glow = QColor(t["app_fg"])
+            h, s, l, _ = glow.getHslF()
+            if h < 0:                   # greyscale: QColor reports hue -1
+                h, s = 0.0, 0.0
+            # Keep the theme's hue — NOCturnal glows green, Telecomm Blues
+            # gold — but force it bright. app_fg is not always light enough
+            # to glow with: Laser Toner's body text is a dark blue, and at
+            # its own lightness it produced no visible rim at all.
+            glow.setHslF(h, s, max(l, 0.78), 1.0)
+            glow.setAlpha(200)
+            effect.setColor(glow)
+            effect.setOffset(0, 0)      # a halo has no light source
+            effect.setBlurRadius(12)
+        else:
+            effect.setColor(QColor(0, 0, 0, 110))
+            effect.setOffset(0, 3)
+            effect.setBlurRadius(18)
+        return effect
+
+    def _drop(self):
+        """Remove the lift. Safe to call when the row is already gone."""
+        h = self.host
+        w = h._widgets.get(self.dragging_rid)
+        container = w.get("container") if w else None
+        if container is None:
+            return
+        try:
+            container.setGraphicsEffect(None)
+        except RuntimeError:
+            # The C++ object outlived its Python wrapper (a rebuild landed
+            # between the drop and here). Nothing to clean up in that case.
+            pass
 
     def start(self, rowid):
         """Begin drag-reordering a row."""
@@ -65,6 +175,7 @@ class DragController:
         QApplication.instance().installEventFilter(h)
         h._rebuild_rows()
         self.last_row = h._visible_rowids.index(rowid)
+        self._lift()
 
     def end(self):
         """Finish drag-reordering and persist the new order."""
@@ -74,6 +185,11 @@ class DragController:
         visible_snapshot = self.visible_rids
 
         self._stop_autoscroll()
+        # Before the rid is cleared — _drop() looks the container up by it.
+        # The rebuild at the end of this method would discard the effect with
+        # the old container anyway, but only on the path where a rebuild
+        # actually happens.
+        self._drop()
         self._last_pos    = None
         self.dragging_rid = None
         self.last_row     = -1
@@ -160,7 +276,7 @@ class DragController:
     def _on_autoscroll_tick(self):
         """Advance one row, then re-run the hit test at the held cursor.
 
-        The cursor hasn't moved, but the rows have — so the row under it is a
+        The cursor hasn't moved, but the rows have, so the row under it is a
         different one, and the dragged row needs to swap with it.
         """
         h = self.host
@@ -291,6 +407,10 @@ class DragController:
         for rid in new_visible_rids:
             if rid not in h._widgets:
                 h._rebuild_rows()
+                # Bails out before the _lift() at the bottom of this method,
+                # and this is the one branch that definitely destroyed the
+                # container holding the effect.
+                self._lift()
                 return
 
         h._visible_rowids = new_visible_rids
@@ -318,12 +438,18 @@ class DragController:
                 row_bg = row.get("bg") or t["app_bg"]
 
             if self.dragging_rid == rid:
-                row_bg = t["row_drag_bg"]
+                row_bg = (t["group_drag_bg"] if row["type"] == "separator"
+                          else t["row_drag_bg"])
 
             margin_css = (f"margin-left: {indent_px - 3}px;"
                           if row["type"] == "timer" and is_child else "")
 
+            # The dragged row never draws one — see RowFactory for why. This
+            # path rebuilds the stylesheet from scratch on every mouse move,
+            # so the rule has to exist in both places or the line comes back
+            # the instant the row is moved.
             needs_sep = (ss.client_separators
+                         and self.dragging_rid != rid
                          and insert_idx < len(visible_entries) - 1
                          and row["type"] == "timer"
                          and visible_entries[insert_idx + 1][0]["type"] == "timer")
@@ -335,11 +461,23 @@ class DragController:
             # These rewrites replace the whole stylesheet, so the hover rule
             # RowFactory baked in has to be re-appended — without it a row
             # silently stops tinting on hover after the first drag.
+            # Group headers get their own hover colour: a bordered box reads
+            # very differently from an open row, so the tint that works for
+            # one is rarely the one that works for the other.
+            is_sep = (row["type"] == "separator")
+            hov_bg = t["group_hover_bg"] if is_sep else t["row_hover_bg"]
+            # A header's border is part of its fill as far as the eye is
+            # concerned, so the hover rule has to move it too — otherwise the
+            # box keeps its resting outline and the tint looks like it only
+            # half applied.
+            hov_line = (f" border-color: {t['group_hover_line']};"
+                        if is_sep else "")
             hover_css = (f" #rowBg[hov=\"1\"] {{"
-                         f" background-color: {t['row_hover_bg']}; }}"
+                         f" background-color: {hov_bg};{hov_line} }}"
                          f" #rowBg[nosep=\"1\"] {{ border-bottom: none; }}")
-            if row["type"] == "separator":
-                group_line = t["group_line"]
+            if is_sep:
+                group_line = (t["group_drag_line"]
+                              if self.dragging_rid == rid else t["group_line"])
                 container.setStyleSheet(
                     f"#rowBg {{ background-color: {row_bg}; {margin_css}"
                     f" border: 2px solid {group_line}; }}" + hover_css)
@@ -361,6 +499,8 @@ class DragController:
         # position the row started from. activate() above is what makes the
         # new geometry readable here.
         h._sync_drag_strip()
+        # Re-raise (and re-create after a fallback rebuild) the elevation.
+        self._lift()
 
     def _row_at_y(self, y):
         """Return the visible row index whose vertical center is closest to y."""

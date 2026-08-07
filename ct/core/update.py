@@ -107,7 +107,7 @@ def check(url=MANIFEST_URL, timeout=TIMEOUT_SECONDS):
     remote = manifest.get("version")
     if not is_newer(remote):
         log.info(f"Update check: running {__version__}, "
-                 f"latest is {remote} — up to date.")
+                 f"latest is {remote}. Up to date.")
         return CURRENT, manifest
     if not str(manifest.get("url", "")).startswith("https://"):
         # A manifest that advertises a version but no usable download is a
@@ -182,8 +182,8 @@ def download(url, dest_dir=None, timeout=120, sha256=None):
                         f"{expected}; discarding.")
             return None
         if len(data) < 1_000_000:
-            log.warning(f"Update download was only {len(data)} bytes — that "
-                        f"is not an installer; discarding.")
+            log.warning(f"Update download was only {len(data)} bytes... that "
+                        f"is not an installer, discarding")
             return None
         path.write_bytes(data)
         if sha256:

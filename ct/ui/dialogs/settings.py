@@ -34,7 +34,8 @@ from PySide6.QtWidgets import (
 from ct.common.setup import PATHS
 from ct.ui.theme import THEMES, SIZES, FONTS, build_menu_stylesheet
 from ct.ui.widgets import TickCheckBox
-from ct.util import format_time
+from ct.util import (format_time, format_copy_time,
+                     COPY_FORMATS, DEFAULT_COPY_FORMAT)
 
 
 class PreviewRow(QWidget):
@@ -166,6 +167,7 @@ class ConfigDialog(QDialog):
         self.chosen_daily_reset_time = cfg.get("daily_reset_time", "03:00")
         self.chosen_show_adjust_buttons = cfg.get("show_adjust_buttons", True)
         self.chosen_recover_running_time = cfg.get("recover_running_time", True)
+        self.chosen_copy_format = cfg.get("copy_format", DEFAULT_COPY_FORMAT)
         self.restore_path = None
         self.restore_mode = "all"     # "all" | "times" | "rows"
         self.style_changed = False
@@ -352,6 +354,31 @@ class ConfigDialog(QDialog):
         self._confirm_reset.setToolTip(confirm_reset_tooltip)
         row.addWidget(lbl)
         row.addWidget(self._confirm_reset)
+        lay.addLayout(row)
+
+        # Copy Format
+        row = QHBoxLayout()
+        lbl = QLabel("Copy Format:")
+        # Each option shows itself worked through the same example, because
+        # "Decimal" and "Raw Minutes" mean nothing until you see one.
+        copy_format_tooltip = (
+            "What a copied time is put on the clipboard as.\n\n"
+            "For a timer reading 05:15:00:\n"
+            "    HH:MM        05:15\n"
+            "    HH:MM:SS     05:15:00\n"
+            "    Decimal      5.25\n"
+            "    Raw Minutes  315\n\n"
+            "HH:MM and Raw Minutes drop any leftover seconds rather")
+        lbl.setFont(QFont("Calibri", 12, QFont.Bold))
+        lbl.setToolTip(copy_format_tooltip)
+        self._copy_fmt = QComboBox()
+        self._copy_fmt.addItems(COPY_FORMATS)
+        self._copy_fmt.setCurrentText(
+            cfg.get("copy_format", DEFAULT_COPY_FORMAT))
+        self._copy_fmt.setMinimumWidth(200)
+        self._copy_fmt.setToolTip(copy_format_tooltip)
+        row.addWidget(lbl)
+        row.addWidget(self._copy_fmt)
         lay.addLayout(row)
 
         # Recover Running Time
@@ -605,9 +632,10 @@ class ConfigDialog(QDialog):
             with open(path, "r", encoding="utf-8") as f:
                 data = json.load(f)
         except (OSError, ValueError):
-            self._toast_main("Couldn't read that entry — nothing copied")
+            self._toast_main("Couldn't read that entry, nothing copied")
             return
         tracked = data.get("session", {}).get("tracked_times", {})
+        fmt = self._copy_format()
         lines = []
         for row in data.get("layout", {}).get("rows", []):
             if row.get("type") != "timer":
@@ -616,7 +644,8 @@ class ConfigDialog(QDialog):
                           .get("elapsed", 0))
             if elapsed < 1:
                 continue
-            lines.append(f"{row.get('name', '')}: {format_time(elapsed)}")
+            lines.append(f"{row.get('name', '')}: "
+                         f"{format_copy_time(elapsed, fmt)}")
         if not lines:
             self._toast_main(f"No times to copy from {label}")
             return
@@ -860,9 +889,20 @@ class ConfigDialog(QDialog):
         self._preview_scroll.setWidget(content)
         self._preview_scroll.setVisible(True)
 
+    def _copy_format(self):
+        """The format to copy in, read LIVE from the dropdown.
+
+        Not self.chosen_copy_format, which only updates on Apply. Changing
+        the dropdown and immediately copying from a preview should give the
+        format you just picked — that is the obvious way to check what an
+        option actually produces before committing to it.
+        """
+        combo = getattr(self, "_copy_fmt", None)
+        return combo.currentText() if combo is not None else self.chosen_copy_format
+
     def _copy_row_time(self, name, elapsed):
         """Copy a previewed timer's time, and say so on the main window."""
-        time_str = format_time(int(elapsed))
+        time_str = format_copy_time(int(elapsed), self._copy_format())
         QApplication.clipboard().setText(time_str)
         main = self.parentWidget()
         if main is not None and hasattr(main, "show_toast"):
@@ -1146,7 +1186,7 @@ class ConfigDialog(QDialog):
             context={"version": __version__,
                      "os": platform.platform(terse=True)},
         )
-        self._toast_main("Report sent — thank you!" if ok
+        self._toast_main("Report sent, thank you!" if ok
                          else "Could not send the report right now")
 
     def _build_appearance_page(self, cfg):
@@ -1331,15 +1371,16 @@ class ConfigDialog(QDialog):
         self._p1_bullet.setAlignment(Qt.AlignCenter)
         self._p1_name = QLabel("Acme Calls")
         self._p1_name.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
-        self._p1_start = QPushButton("Start")
-        self._p1_stop = QPushButton("Stop")
+        # One button, not two: it reads Stop while running and Start while
+        # stopped, exactly like the real row. Row 1 is the running sample.
+        self._p1_start = QPushButton("Stop")
         self._p1_time = QLabel("00:05:21")
         self._p1_time.setAlignment(Qt.AlignCenter)
         self._p1_minus = QPushButton("-5")
         self._p1_plus = QPushButton("+5")
         self._p1_x = QPushButton("X")
         for w in (self._p1_bullet, self._p1_name, self._p1_start,
-                  self._p1_stop, self._p1_time, self._p1_minus,
+                  self._p1_time, self._p1_minus,
                   self._p1_plus, self._p1_x):
             t1_lay.addWidget(w)
         pv_lay.addWidget(self._p_t1_row)
@@ -1355,14 +1396,13 @@ class ConfigDialog(QDialog):
         self._p2_name = QLabel("Acme Tickets")
         self._p2_name.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
         self._p2_start = QPushButton("Start")
-        self._p2_stop = QPushButton("Stop")
         self._p2_time = QLabel("00:07:13")
         self._p2_time.setAlignment(Qt.AlignCenter)
         self._p2_minus = QPushButton("-5")
         self._p2_plus = QPushButton("+5")
         self._p2_x = QPushButton("X")
         for w in (self._p2_bullet, self._p2_name, self._p2_start,
-                  self._p2_stop, self._p2_time, self._p2_minus,
+                  self._p2_time, self._p2_minus,
                   self._p2_plus, self._p2_x):
             t2_lay.addWidget(w)
         pv_lay.addWidget(self._p_t2_row)
@@ -1446,8 +1486,8 @@ class ConfigDialog(QDialog):
             f"  color: {act_fg};"
             f"  background-color: {t['control_hover_bg']}; }}"
         )
-        for btn in (self._p1_start, self._p1_stop, self._p1_minus,
-                    self._p1_plus, self._p2_start, self._p2_stop,
+        for btn in (self._p1_start, self._p1_minus,
+                    self._p1_plus, self._p2_start,
                     self._p2_minus, self._p2_plus):
             btn.setStyleSheet(btn_style)
         for btn in (self._p_toggle, self._p_gx, self._p1_x, self._p2_x):
@@ -1487,13 +1527,13 @@ class ConfigDialog(QDialog):
             self._align.currentText(), Qt.AlignLeft | Qt.AlignVCenter)
 
         # Timer row fonts
-        for (bullet, name, start, stop, time_l, minus, plus, x,
+        for (bullet, name, start, time_l, minus, plus, x,
              is_running) in (
                 (self._p1_bullet, self._p1_name, self._p1_start,
-                 self._p1_stop, self._p1_time, self._p1_minus,
+                 self._p1_time, self._p1_minus,
                  self._p1_plus, self._p1_x, True),
                 (self._p2_bullet, self._p2_name, self._p2_start,
-                 self._p2_stop, self._p2_time, self._p2_minus,
+                 self._p2_time, self._p2_minus,
                  self._p2_plus, self._p2_x, False),
         ):
             bullet.setFont(QFont(font_family, s["action"]))
@@ -1511,7 +1551,6 @@ class ConfigDialog(QDialog):
             name.setFixedWidth(name_w)
             name.setAlignment(tmr_align)
             start.setFont(QFont(font_family, s["time"]))
-            stop.setFont(QFont(font_family, s["time"]))
             time_l.setFixedWidth(time_w)
             minus.setFont(QFont(font_family, s["action"]))
             plus.setFont(QFont(font_family, s["action"]))
@@ -1554,6 +1593,7 @@ class ConfigDialog(QDialog):
             self._confirm_reset.currentText() == "Yes")
         self.chosen_recover_running_time = (
             self._recover_running.currentText() == "Yes")
+        self.chosen_copy_format = self._copy_fmt.currentText()
         # Daily Reset
         self.chosen_daily_reset_enabled = (
             self._daily_reset.currentText() == "On")
@@ -1588,6 +1628,7 @@ class ConfigDialog(QDialog):
             "snapshot_min_minutes": self.chosen_snapshot_min_minutes,
             "show_adjust_buttons":  self.chosen_show_adjust_buttons,
             "recover_running_time": self.chosen_recover_running_time,
+            "copy_format":          self.chosen_copy_format,
         }
         self.style_changed = any(
             self._initial_cfg.get(k) != v for k, v in chosen.items())

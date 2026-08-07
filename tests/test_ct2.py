@@ -55,7 +55,7 @@ def _install_write_guards():
     Attribution, not detection-by-mtime: the user's own app autosaves every
     20s, so comparing the file's stat across a run reports their running app
     as a test leak. (The previous net did exactly that, and then "restored" a
-    stale backup over their live session — corrupting the thing it guarded.)
+    stale backup over their live session, corrupting the thing it guarded.)
     """
     import os
     real = str(_real_state_path)
@@ -1326,6 +1326,29 @@ class TestQtRowHover(QtWindowTestBase):
         self.win._on_row_hover(rid, False)
         self.assertNotEqual(rc.property("hov"), "1")
 
+    def assertStripCovers(self, strip, rc, gap):
+        """The gap fill starts one gap up and leaves no seam at the row.
+
+        The bottom edge overlaps the row's top by a pixel ONLY when the row
+        carries a QGraphicsEffect (i.e. it is being dragged). Such a row is
+        composited from an offscreen pixmap, and under fractional display
+        scaling the rounding drops its top device pixel, showing the parent
+        through as a hard line; the overlap covers that.
+
+        A hovered row has no effect and so must NOT get the overlap — the
+        strip is raised above the row, so an overlap there clips the top
+        pixel off the row's buttons, which on a bordered button eats the
+        border and looks like the button has been sliced.
+        """
+        self.assertEqual(strip.y(), rc.y() - gap,
+                         "the strip no longer starts one gap above the row")
+        self.assertGreaterEqual(
+            strip.geometry().bottom() + 1, rc.y(),
+            "a gap between the strip and the row renders as a seam")
+        lifted = rc.graphicsEffect() is not None
+        self.assertEqual(strip.height(), gap + (1 if lifted else 0),
+                         "overlap must appear only on a row with an effect")
+
     def test_hover_strip_fills_the_gap_above_the_row(self):
         rid = self.rows_with_gap()[0]
         rc = self.win._widgets[rid]["container"]
@@ -1335,10 +1358,9 @@ class TestQtRowHover(QtWindowTestBase):
         self.win._on_row_hover(rid, True)
         strip = self.win._hover_strip
         self.assertTrue(strip.isVisible())
-        # Flush with the row's top edge, exactly one gap tall, and aligned to
-        # the row's PAINTED left edge (indented children inset their bg).
-        self.assertEqual(strip.geometry().bottom() + 1, rc.y())
-        self.assertEqual(strip.height(), gap)
+        # Fills the gap and meets the row, and is aligned to the row's PAINTED
+        # left edge (indented children inset their bg).
+        self.assertStripCovers(strip, rc, gap)
         self.assertEqual(strip.x(), rc.x() + self.win._widgets[rid]["bg_left"])
 
     def test_first_row_draws_no_strip(self):
@@ -1376,7 +1398,7 @@ class TestQtRowHover(QtWindowTestBase):
         strip = self.win._hover_strip
         self.assertIsNotNone(strip)
         self.assertTrue(strip.isVisible())
-        self.assertEqual(strip.geometry().bottom() + 1, rc.y())
+        self.assertStripCovers(strip, rc, gap)
         from ct.ui.theme.colors import THEMES
         theme = THEMES[self.win._state.settings.theme]
         self.assertIn(theme["row_drag_bg"].lower(), strip.styleSheet().lower())
@@ -1406,9 +1428,113 @@ class TestQtRowHover(QtWindowTestBase):
         rc = self.win._widgets[rid]["container"]
         strip = self.win._hover_strip
         self.assertNotEqual(strip.y(), start_y, "the fill did not move")
-        self.assertEqual(strip.geometry().bottom() + 1, rc.y())
+        self.assertStripCovers(strip, rc, gap)
         self.win._drag.end()
         self.settle()
+
+    def test_group_state_colours_are_wired_independently(self):
+        """All four group state keys reach the header, and none leak to rows.
+
+        Injects values, rather than reading the shipped palette, because
+        every theme currently seeds these EQUAL to their row/base
+        counterparts — so a test comparing real values passes no matter how
+        the code is wired, and the sibling tests below skip themselves
+        entirely. These four hexes appear nowhere else in any theme, so a
+        match cannot be coincidence.
+        """
+        from ct.ui.theme.colors import THEMES
+        theme = THEMES["E-Ink (Default)"]
+        original = dict(theme)
+        self.addCleanup(lambda: (theme.clear(), theme.update(original)))
+        theme["group_hover_bg"]   = "#111111"
+        theme["group_hover_line"] = "#222222"
+        theme["group_drag_bg"]    = "#333333"
+        theme["group_drag_line"]  = "#444444"
+
+        self.win._state.settings.theme = "E-Ink (Default)"
+        self.win._rebuild_rows()
+        css = lambda rid: self.win._widgets[rid]["container"].styleSheet().lower()
+        sep = next(r["rowid"] for r in self.win._state.rows
+                   if r["type"] == "separator")
+        timer = next(r["rowid"] for r in self.win._state.rows
+                     if r["type"] == "timer")
+
+        self.assertIn("#111111", css(sep), "group_hover_bg not applied")
+        self.assertIn("#222222", css(sep), "group_hover_line not applied")
+
+        self.win._drag.start(sep)
+        built = css(sep)
+        self.win._drag._reorder_visual()
+        moved = css(sep)
+        self.win._drag.end()
+        for label, sheet in (("on build", built), ("after a reorder", moved)):
+            self.assertIn("#333333", sheet, f"group_drag_bg lost {label}")
+            self.assertIn("#444444", sheet, f"group_drag_line lost {label}")
+
+        # None of the four may appear on an ordinary timer row.
+        self.win._drag.start(timer)
+        row_css = css(timer)
+        self.win._drag.end()
+        for hexv in ("#111111", "#222222", "#333333", "#444444"):
+            self.assertNotIn(hexv, row_css,
+                             f"group colour {hexv} leaked onto a timer row")
+
+    def test_group_headers_hover_with_their_own_colour(self):
+        """A bordered box reads very differently from an open row, so the
+        tint that works for one is rarely the one that works for the other."""
+        from ct.ui.theme.colors import THEMES
+        for name in THEMES:
+            t = THEMES[name]
+            if t["group_hover_bg"] == t["row_hover_bg"]:
+                continue          # seeded identical; nothing to tell apart
+            with self.subTest(theme=name):
+                self.win._state.settings.theme = name
+                self.win._rebuild_rows()
+                sep = next(r["rowid"] for r in self.win._state.rows
+                           if r["type"] == "separator")
+                css = self.win._widgets[sep]["container"].styleSheet().lower()
+                self.assertIn(t["group_hover_bg"].lower(), css,
+                              "group header does not use group_hover_bg")
+
+    def test_group_headers_drag_with_their_own_colour(self):
+        """Same reasoning as the hover colour: a bordered box on group_bg
+        starts somewhere completely different from an open row on app_bg."""
+        from ct.ui.theme.colors import THEMES
+        for name, t in THEMES.items():
+            if t["group_drag_bg"] == t["row_drag_bg"]:
+                continue          # seeded identical; nothing to tell apart
+            with self.subTest(theme=name):
+                self.win._state.settings.theme = name
+                self.win._rebuild_rows()
+                sep = next(r["rowid"] for r in self.win._state.rows
+                           if r["type"] == "separator")
+                self.win._drag.start(sep)
+                built = self.win._widgets[sep]["container"].styleSheet().lower()
+                self.win._drag._reorder_visual()
+                reordered = self.win._widgets[sep]["container"].styleSheet().lower()
+                self.win._drag.end()
+                want = t["group_drag_bg"].lower()
+                self.assertIn(want, built, "group header ignores group_drag_bg")
+                self.assertIn(want, reordered,
+                              "group_drag_bg lost when the row was moved")
+
+    def test_group_hover_colour_survives_a_reorder(self):
+        """_reorder_visual rewrites every stylesheet and rebuilds the hover
+        rule from scratch — it has to pick the group colour again."""
+        from ct.ui.theme.colors import THEMES
+        name = next((n for n, t in THEMES.items()
+                     if t["group_hover_bg"] != t["row_hover_bg"]), None)
+        if name is None:
+            self.skipTest("every theme still seeds group_hover_bg = row_hover_bg")
+        self.win._state.settings.theme = name
+        self.win._rebuild_rows()
+        sep = next(r["rowid"] for r in self.win._state.rows
+                   if r["type"] == "separator")
+        self.win._drag.start(sep)
+        self.win._drag._reorder_visual()
+        css = self.win._widgets[sep]["container"].styleSheet().lower()
+        self.win._drag.end()
+        self.assertIn(THEMES[name]["group_hover_bg"].lower(), css)
 
     def test_reorder_keeps_the_hover_rule_on_every_row(self):
         """_reorder_visual rewrites each container's stylesheet wholesale and
@@ -1764,6 +1890,293 @@ class TestQtUpdateThreading(QtWindowTestBase):
 
 
 
+class TestQtDragLift(QtWindowTestBase):
+    """The dragged row reads as picked up off the page.
+
+    Before this existed, 20 of 21 themes used the same value for
+    row_drag_bg and row_hover_bg — and the cursor is necessarily ON the row
+    being dragged, so it would be hovered anyway. The dragged row rendered
+    pixel-identical to a merely hovered one. The elevation is what carries
+    the signal on its own.
+    """
+
+    def effect_on(self, rid):
+        w = self.win._widgets.get(rid)
+        container = w.get("container") if w else None
+        return None if container is None else container.graphicsEffect()
+
+    def test_drag_lifts_the_row(self):
+        self.win._drag.start(12)
+        self.assertIsNotNone(self.effect_on(12), "the dragged row has no lift")
+        self.win._drag.end()
+
+    def test_only_the_dragged_row_is_lifted(self):
+        self.win._drag.start(12)
+        others = [r for r in (10, 11, 13) if self.effect_on(r) is not None]
+        self.win._drag.end()
+        self.assertEqual(others, [], f"rows {others} were lifted too")
+
+    def test_the_lift_survives_a_reorder(self):
+        """_reorder_visual removes and re-inserts every container on every
+        mouse move. The effect must not be a casualty of that."""
+        self.win._drag.start(12)
+        self.win._drag._reorder_visual()
+        lifted = self.effect_on(12)
+        self.win._drag.end()
+        self.assertIsNotNone(lifted, "the lift was lost on the first reorder")
+
+    def test_the_lift_survives_a_full_rebuild_mid_drag(self):
+        """_reorder_visual falls back to _rebuild_rows when a row is missing,
+        which builds NEW containers and drops the effect with the old ones."""
+        self.win._drag.start(12)
+        self.win._rebuild_rows()
+        self.win._drag._lift()
+        lifted = self.effect_on(12)
+        self.win._drag.end()
+        self.assertIsNotNone(lifted)
+
+    def test_dropping_removes_the_lift(self):
+        self.win._drag.start(12)
+        self.win._drag.end()
+        self.assertIsNone(self.effect_on(12),
+                          "the row is still elevated after being dropped")
+
+    def test_the_gap_fill_strip_stays_above_the_lifted_row(self):
+        """Otherwise the shadow blurs across the strip and the join reads as
+        a hard seam between the row and its extension.
+
+        The strip fills only the inter-row spacing — about four pixels — so a
+        blurred shadow laid over it looks exactly like a drawn black line.
+        """
+        self.win._state.settings.client_separators = True
+        self.win._rebuild_rows()
+        self.win._drag.start(12)
+        container = self.win._widgets[12]["container"]
+        strip = self.win._live_strip()
+        self.assertIsNotNone(strip, "no gap-fill strip during the drag")
+        siblings = container.parentWidget().children()
+        self.assertIn(strip, siblings)
+        row_z, strip_z = siblings.index(container), siblings.index(strip)
+        self.win._drag.end()
+        # Later in children() == painted on top.
+        self.assertGreater(strip_z, row_z,
+                           "the lifted row is above its own gap fill, so the "
+                           "shadow paints over the fill")
+
+    def test_the_strip_stays_on_top_across_a_reorder(self):
+        """_reorder_visual re-raises the row on every mouse move."""
+        self.win._state.settings.client_separators = True
+        self.win._rebuild_rows()
+        self.win._drag.start(12)
+        self.win._drag._reorder_visual()
+        container = self.win._widgets[12]["container"]
+        strip = self.win._live_strip()
+        siblings = container.parentWidget().children()
+        ok = (strip is not None and strip in siblings
+              and siblings.index(strip) > siblings.index(container))
+        self.win._drag.end()
+        self.assertTrue(ok, "the strip fell behind the row after a reorder")
+
+    def sep_css(self, rid):
+        """Is a separator line actually DRAWN on this row?
+
+        Not a bare "border-bottom" search: every row also carries the
+        `#rowBg[nosep="1"] { border-bottom: none; }` rule that
+        _update_bottom_line switches on, so that substring is always
+        present. Only a width means a line is painted.
+        """
+        css = self.win._widgets[rid]["container"].styleSheet()
+        return "border-bottom: 1px" in css or "border-bottom: 2px" in css
+
+    def test_a_lifted_row_drops_its_separator(self):
+        """The line divides this row from the next one — the dragged row has
+        left the list, so it should not carry one.
+
+        Left on, it paints a hard row_line edge along the bottom of a row
+        that has otherwise gone to row_drag_bg. On a high-contrast theme
+        (95 Windows: teal drag on grey chrome) that reads as the bottom
+        pixel of the row failing to tint.
+        """
+        self.win._state.settings.client_separators = True
+        self.win._rebuild_rows()
+        self.assertTrue(self.sep_css(11), "row 11 should have a separator")
+        self.win._drag.start(11)
+        dragged, neighbour = self.sep_css(11), self.sep_css(12)
+        self.win._drag.end()
+        self.assertFalse(dragged, "the lifted row still draws a separator")
+        self.assertTrue(neighbour, "a row that is NOT dragged lost its line")
+
+    def test_the_separator_stays_gone_across_a_reorder(self):
+        """_reorder_visual rebuilds every stylesheet on each mouse move, so
+        the rule has to exist there too or the line returns the instant the
+        row is moved."""
+        self.win._state.settings.client_separators = True
+        self.win._rebuild_rows()
+        self.win._drag.start(11)
+        self.win._drag._reorder_visual()
+        dragged = self.sep_css(11)
+        self.win._drag.end()
+        self.assertFalse(dragged, "the separator came back during the drag")
+
+    def test_the_separator_returns_after_the_drop(self):
+        self.win._state.settings.client_separators = True
+        self.win._rebuild_rows()
+        self.win._drag.start(11)
+        self.win._drag.end()
+        self.settle()
+        self.assertTrue(self.sep_css(11),
+                        "the row never got its separator back")
+
+    def test_dark_themes_get_a_halo_and_light_ones_a_shadow(self):
+        """Black on near-black is invisible at any alpha, so dark themes
+        signal elevation with a light rim instead of a cast shadow."""
+        from ct.ui.theme import THEMES
+        from ct.ui.drag import _luma
+        for name in ("Galaxy Dark", "NOCturnal", "Manila Memories", "95 Windows"):
+            with self.subTest(theme=name):
+                self.win._state.settings.theme = name
+                self.win._rebuild_rows()
+                self.win._drag.start(12)
+                effect = self.effect_on(12)
+                self.assertIsNotNone(effect)
+                if _luma(THEMES[name]["app_bg"]) < 128:
+                    self.assertEqual(effect.yOffset(), 0,
+                                     "a halo must not have a light source")
+                    self.assertGreater(effect.color().lightness(), 100,
+                                       "a dark theme needs a LIGHT rim")
+                else:
+                    self.assertGreater(effect.yOffset(), 0,
+                                       "a cast shadow needs an offset")
+                    self.assertLess(effect.color().lightness(), 100)
+                self.win._drag.end()
+
+    def test_every_theme_produces_a_usable_lift(self):
+        """A theme with a malformed app_bg must not crash a drag."""
+        from ct.ui.theme import THEMES
+        for name in THEMES:
+            with self.subTest(theme=name):
+                self.win._state.settings.theme = name
+                self.win._rebuild_rows()
+                self.win._drag.start(12)
+                effect = self.effect_on(12)
+                self.assertIsNotNone(effect)
+                self.assertGreater(effect.blurRadius(), 0)
+                self.assertGreater(effect.color().alpha(), 0)
+                self.win._drag.end()
+
+
+class TestQtSettingsDialog(QtWindowTestBase):
+    """The settings dialog builds and its preview survives every combination.
+
+    This class exists because 291 passing tests once shipped a settings
+    dialog that raised on construction: a widget was removed from the
+    preview rows but its name was left in the tuple the styling loop
+    unpacks. Nothing opened the dialog, so nothing noticed. Opening it at
+    all is most of the value here.
+    """
+
+    def build(self):
+        # No addCleanup: cleanups run AFTER tearDown, which destroys the
+        # window this dialog is parented to — touching it there raises
+        # "C++ object already deleted". Qt frees it with its parent.
+        from ct.ui.dialogs.settings import ConfigDialog
+        return ConfigDialog(self.win, self.win._state.settings.to_dict(),
+                            lambda: None)
+
+    def test_the_dialog_builds(self):
+        self.assertIsNotNone(self.build())
+
+    def test_every_page_is_present(self):
+        dlg = self.build()
+        self.assertEqual(dlg._stack.count(), dlg._tab_list.count())
+
+    def test_general_is_preselected_not_about(self):
+        """About is listed first but must not be what opens."""
+        dlg = self.build()
+        self.assertEqual(dlg._stack.currentIndex(), dlg._tab_list.currentRow())
+        self.assertNotEqual(dlg._tab_list.currentRow(), 0)
+
+    def test_the_preview_shows_one_toggle_per_row(self):
+        """Two buttons per row was the pre-toggle layout. Row 1 is the
+        running sample, row 2 the stopped one."""
+        dlg = self.build()
+        self.assertEqual(dlg._p1_start.text(), "Stop")
+        self.assertEqual(dlg._p2_start.text(), "Start")
+        self.assertFalse(hasattr(dlg, "_p1_stop"))
+        self.assertFalse(hasattr(dlg, "_p2_stop"))
+
+    def test_the_preview_refreshes_for_every_theme_and_size(self):
+        """_refresh_preview restyles every preview widget, so a widget added
+        or removed without updating that loop raises here."""
+        from ct.ui.theme import THEMES, SIZES
+        dlg = self.build()
+        for name in THEMES:
+            dlg._theme.setCurrentText(name)
+            for size in SIZES:
+                with self.subTest(theme=name, size=size):
+                    dlg._size.setCurrentText(size)
+                    dlg._refresh_preview()
+
+
+class TestQtStopAll(QtWindowTestBase):
+    """'Stop All Timers' in the row context menu.
+
+    Deliberately NOT a footer button. Starting is exclusive by default, so
+    0 or 1 timers run and the row's own toggle already covers that; a second
+    running-related control beside the status line would split an affordance
+    that currently has one meaning.
+    """
+
+    def menu_labels(self):
+        """Every action the row menu would offer, without opening it."""
+        from unittest.mock import patch, MagicMock
+        labels = []
+
+        def add(text):
+            # Must return an action: callers immediately setEnabled() on it.
+            labels.append(text)
+            return MagicMock()
+
+        with patch("ct.ui.app.QMenu") as fake:
+            menu = fake.return_value
+            menu.addAction.side_effect = add
+            menu.exec.return_value = None
+            self.win._on_row_context_menu(11, self.win.rect().center())
+        return labels
+
+    def test_absent_when_nothing_is_running(self):
+        """A permanently-greyed entry is clutter on every right-click."""
+        self.assertNotIn("Stop All Timers", self.menu_labels())
+
+    def test_present_while_a_timer_runs(self):
+        self.win._start_exclusive(11)
+        labels = self.menu_labels()
+        self.win._stop_all()
+        self.assertIn("Stop All Timers", labels)
+
+    def test_it_stops_every_running_timer(self):
+        self.win._start_additional(11)
+        self.win._start_additional(12)
+        self.assertEqual(len(self.win._running_rids()), 2)
+        self.win._stop_all()
+        self.assertEqual(self.win._running_rids(), [])
+
+    def test_stopping_keeps_the_elapsed_time(self):
+        """Stop is not reset — the whole point of the separate entry."""
+        self.win.timers[11].elapsed = 500.0
+        self.win._start_exclusive(11)
+        self.win._stop_all()
+        self.assertGreaterEqual(self.win.timers[11].current_elapsed, 500.0)
+
+    def test_the_toggle_button_label_follows(self):
+        """_stop_all goes through _set_bold, which owns the button's text.
+        Without that the row would sit stopped with a 'Stop' button on it."""
+        self.win._start_exclusive(11)
+        self.assertEqual(self.win._widgets[11]["toggle"].text(), "Stop")
+        self.win._stop_all()
+        self.assertEqual(self.win._widgets[11]["toggle"].text(), "Start")
+
+
 class TestQtStatusCopy(QtWindowTestBase):
     """The footer click copies every time, whatever is running."""
 
@@ -1785,9 +2198,11 @@ class TestQtStatusCopy(QtWindowTestBase):
         return "\n".join(self.win._session_lines())
 
     def test_copies_with_nothing_running(self):
+        # HH:MM is the default copy format; the row on screen still reads
+        # HH:MM:SS. TestCopyFormat covers the other options.
         text = self.copied()
-        self.assertIn("Alpha: 01:02:05", text)
-        self.assertIn("Bravo: 00:10:12", text)
+        self.assertIn("Alpha: 01:02", text)
+        self.assertIn("Bravo: 00:10", text)
 
     def test_copies_while_one_is_running(self):
         """This used to jump to the row instead — copy-all was unreachable
@@ -1796,8 +2211,21 @@ class TestQtStatusCopy(QtWindowTestBase):
         self.settle()
         text = self.copied()
         self.assertIn("Alpha:", text)
-        self.assertIn("Bravo: 00:10:12", text)
+        self.assertIn("Bravo: 00:10", text)
         self.win._stop_all()
+
+    def test_the_copy_format_setting_reaches_the_session_copy(self):
+        """Copy-all is the highest-volume copy in the app; a format that
+        applied only to single rows would be the one people notice."""
+        from ct.util import format_copy_time
+        cases = {"HH:MM": "Alpha: 01:02", "HH:MM:SS": "Alpha: 01:02:05",
+                 "Decimal": "Alpha: 1.03", "Raw Minutes": "Alpha: 62"}
+        for fmt, expected in cases.items():
+            with self.subTest(fmt=fmt):
+                self.win._state.settings.copy_format = fmt
+                self.assertIn(expected, "\n".join(self.win._session_lines()))
+        # And the helper agrees with what the window produced.
+        self.assertEqual(format_copy_time(3725, "Decimal"), "1.03")
 
     def test_copies_while_several_are_running(self):
         self.win._start_additional(11)
@@ -2355,7 +2783,8 @@ class TestThemeColors(unittest.TestCase):
         "control_bg", "control_fg", "control_hover_bg", "control_hover_fg",
         "control_line", "control_border_px",
         "row_running_fg", "row_drag_bg", "row_hover_bg", "row_line",
-        "group_bg", "group_fg", "group_running_fg", "group_line",
+        "group_bg", "group_hover_bg", "group_drag_bg", "group_fg",
+        "group_running_fg", "group_line", "group_hover_line", "group_drag_line",
         "chrome_line",
         "toast_bg", "toast_fg",
     ]
@@ -2579,6 +3008,159 @@ class TestFormatTime(unittest.TestCase):
         from ct.util import format_time
         result = format_time(360000)  # 100 hours
         self.assertEqual(result, "100:00:00")
+
+
+class TestThemeRenames(unittest.TestCase):
+    """Renamed themes survive the rename; retired ones still fall back."""
+
+    def migrate(self, **settings):
+        from ct.core.config import Settings
+        base = Settings().to_dict()
+        base.update(settings)
+        return Settings.from_dict(base)
+
+    def test_a_renamed_theme_follows_its_new_name(self):
+        """T-Magentle shipped from 2026-02-14, so it is in real users'
+        state.json. Without this they silently land on the default."""
+        self.assertEqual(self.migrate(theme="T-Magentle").theme, "T-Magenta")
+
+    def test_every_rename_target_actually_exists(self):
+        """Renaming a theme twice and forgetting to update the map would
+        migrate users onto a name that is gone — worse than not migrating,
+        because it looks handled."""
+        from ct.core.config import Settings
+        from ct.ui.theme.colors import THEMES
+        for old, new in Settings._THEME_RENAMES.items():
+            with self.subTest(rename=f"{old} -> {new}"):
+                self.assertIn(new, THEMES, f"'{new}' is not a real theme")
+                self.assertNotIn(old, THEMES,
+                                 f"'{old}' still exists — that is not a rename")
+
+    def test_a_current_theme_is_untouched(self):
+        self.assertEqual(self.migrate(theme="Galaxy Dark").theme, "Galaxy Dark")
+
+    def test_a_retired_theme_is_left_alone(self):
+        """Deliberately NOT mapped — it falls back at render time instead."""
+        self.assertEqual(self.migrate(theme="Herizons").theme, "Herizons")
+
+    def test_a_rename_and_the_legacy_button_key_migrate_together(self):
+        """_migrate used to bail early when button_visibility was absent, so
+        a theme rename on its own would have been skipped entirely."""
+        from ct.core.config import Settings
+        d = Settings().to_dict()
+        d["theme"] = "T-Magentle"
+        d.pop("show_adjust_buttons")
+        d["button_visibility"] = "None"
+        s = Settings.from_dict(d)
+        self.assertEqual(s.theme, "T-Magenta")
+        self.assertFalse(s.show_adjust_buttons)
+
+    def test_migration_does_not_mutate_the_caller_dict(self):
+        """AppState.load hands in the dict it parsed from disk."""
+        from ct.core.config import Settings
+        d = Settings().to_dict()
+        d["theme"] = "T-Magentle"
+        Settings.from_dict(d)
+        self.assertEqual(d["theme"], "T-Magentle")
+
+
+class TestCopyFormat(unittest.TestCase):
+    """What a copy puts on the clipboard.
+
+    The row on screen is always HH:MM:SS. This is only the copy, because a
+    time is read on screen and pasted somewhere else, and those two want
+    different things — the timesheet on the other end wants HH:MM.
+    """
+
+    def test_the_four_formats_of_five_fifteen(self):
+        """5h15m, the example the whole feature was specified against."""
+        from ct.util import format_copy_time
+        secs = 5 * 3600 + 15 * 60
+        self.assertEqual(format_copy_time(secs, "HH:MM"), "05:15")
+        self.assertEqual(format_copy_time(secs, "HH:MM:SS"), "05:15:00")
+        self.assertEqual(format_copy_time(secs, "Decimal"), "5.25")
+        self.assertEqual(format_copy_time(secs, "Raw Minutes"), "315")
+
+    def test_the_default_is_hh_mm(self):
+        """The timesheet system on the other end expects it, and the seconds
+        were being deleted by hand on every paste."""
+        from ct.util import format_copy_time, DEFAULT_COPY_FORMAT
+        from ct.core.config import Settings
+        self.assertEqual(DEFAULT_COPY_FORMAT, "HH:MM")
+        self.assertEqual(Settings().copy_format, "HH:MM")
+        self.assertEqual(format_copy_time(3725), "01:02")
+
+    def test_leftover_seconds_are_dropped_never_rounded_up(self):
+        """A copied time must never exceed the one on screen — the app would
+        be silently overstating billable time."""
+        from ct.util import format_copy_time
+        secs = 5 * 3600 + 15 * 60 + 59      # 05:15:59
+        self.assertEqual(format_copy_time(secs, "HH:MM"), "05:15")
+        self.assertEqual(format_copy_time(secs, "Raw Minutes"), "315")
+
+    def test_hh_mm_and_raw_minutes_always_agree(self):
+        """Both floor to the whole minute, so they can never disagree about
+        which minute a time is in."""
+        from ct.util import format_copy_time
+        for secs in (0, 59, 60, 3599, 3600, 3725, 86399, 123456):
+            with self.subTest(seconds=secs):
+                hh, mm = format_copy_time(secs, "HH:MM").split(":")
+                self.assertEqual(int(hh) * 60 + int(mm),
+                                 int(format_copy_time(secs, "Raw Minutes")))
+
+    def test_decimal_keeps_two_places(self):
+        """The timesheet convention, and it carries the sub-minute precision
+        the other formats drop."""
+        from ct.util import format_copy_time
+        self.assertEqual(format_copy_time(3600, "Decimal"), "1.00")
+        self.assertEqual(format_copy_time(1800, "Decimal"), "0.50")
+        self.assertEqual(format_copy_time(0, "Decimal"), "0.00")
+        self.assertEqual(format_copy_time(5 * 3600 + 15 * 60 + 45, "Decimal"),
+                         "5.26")
+
+    def test_hours_are_never_wrapped_at_24(self):
+        """A long-running timer must not silently restart at zero."""
+        from ct.util import format_copy_time
+        secs = 30 * 3600 + 5 * 60
+        self.assertEqual(format_copy_time(secs, "HH:MM"), "30:05")
+        self.assertEqual(format_copy_time(secs, "Raw Minutes"), "1805")
+
+    def test_negative_and_zero_clamp(self):
+        from ct.util import format_copy_time
+        for fmt, zero in (("HH:MM", "00:00"), ("HH:MM:SS", "00:00:00"),
+                          ("Decimal", "0.00"), ("Raw Minutes", "0")):
+            with self.subTest(fmt=fmt):
+                self.assertEqual(format_copy_time(-500, fmt), zero)
+                self.assertEqual(format_copy_time(0, fmt), zero)
+
+    def test_an_unknown_format_falls_back_instead_of_raising(self):
+        """A hand-edited state.json must not be able to break copying."""
+        from ct.util import format_copy_time
+        for bad in ("", "hh:mm", "Nonsense", None, 7):
+            with self.subTest(fmt=bad):
+                self.assertEqual(format_copy_time(3725, bad), "01:02")
+
+    def test_every_offered_option_is_implemented(self):
+        """A name in the dropdown with no branch behind it would silently
+        fall back to HH:MM, which looks like the setting being ignored."""
+        from ct.util import format_copy_time, COPY_FORMATS
+        secs = 5 * 3600 + 15 * 60
+        produced = {fmt: format_copy_time(secs, fmt) for fmt in COPY_FORMATS}
+        self.assertEqual(len(set(produced.values())), len(COPY_FORMATS),
+                         f"two options produce the same string: {produced}")
+
+    def test_the_setting_survives_a_save_load_round_trip(self):
+        from ct.core.config import Settings
+        for fmt in ("HH:MM", "HH:MM:SS", "Decimal", "Raw Minutes"):
+            with self.subTest(fmt=fmt):
+                s = Settings.from_dict(Settings(copy_format=fmt).to_dict())
+                self.assertEqual(s.copy_format, fmt)
+
+    def test_a_state_file_predating_the_setting_gets_the_default(self):
+        from ct.core.config import Settings
+        legacy = Settings().to_dict()
+        legacy.pop("copy_format")
+        self.assertEqual(Settings.from_dict(legacy).copy_format, "HH:MM")
 
 
 class TestNowIso(unittest.TestCase):

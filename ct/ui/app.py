@@ -42,7 +42,7 @@ from ct.ui.theme import THEMES, SIZES, build_stylesheet, build_menu_stylesheet
 from ct.ui.ui_blueprint import UIBlueprint
 from ct.ui.row_factory import RowFactory
 from ct.ui.widgets import TickCheckBox
-from ct.util import format_time, now_iso
+from ct.util import format_time, format_copy_time, now_iso
 
 # Permissive denylist: real client names use unicode, '&', '-', ',', etc.
 # Only control characters are stripped — name labels render as PlainText so
@@ -267,7 +267,7 @@ class MainWindow(QMainWindow):
         #    toast below wins if both fire.
         if getattr(self._state.settings, "coerced_keys", []):
             self._pending_toast = (
-                "Some saved settings couldn't be read and were adjusted — see log")
+                "Some saved settings couldn't be read and were adjusted. See log for more info")
 
         # Daily reset catch-up — if the app was closed and we missed a
         #    reset boundary, save the old session and zero out timers.
@@ -484,7 +484,7 @@ class MainWindow(QMainWindow):
         row_containers = []    # every row widget, for the uniform-height pass
 
         if not self._state.rows:
-            lbl = QLabel("No clients. Click the unlock button in\nthe bottom right and add one to begin!")
+            lbl = QLabel("No clients. Click the unlock button in\nthe bottom left and add one to begin!")
             lbl.setFont(QFont(ss.font, s["label"]))
             lbl.setAlignment(Qt.AlignCenter)
             self._grid.addWidget(lbl)
@@ -1246,8 +1246,25 @@ class MainWindow(QMainWindow):
             color = t["row_hover_bg"]
         strip.setStyleSheet(
             f"#hoverStrip {{ background-color: {color}; }}")
+        # One extra pixel of height, but ONLY for a row carrying a graphics
+        # effect — i.e. the row being dragged.
+        #
+        # Such a row is rendered through an offscreen pixmap, and compositing
+        # that pixmap under fractional display scaling (125%, 150% — the
+        # Windows default on most laptops) rounds its top edge away, letting
+        # the parent show through for one device pixel. The row pitch is odd,
+        # so the rounding flips with the row's y parity and the seam appears
+        # on every other position. Measured: no effect = never; effect =
+        # alternating; effect + the extra pixel = never.
+        #
+        # Conditional, not always on, because the strip is RAISED above the
+        # row: any overlap covers the top pixel of the row's contents too. On
+        # a bordered button that eats the top of the border and reads as the
+        # button being sliced. A hovered row has no effect and therefore no
+        # seam, so it must not pay that cost.
+        overlap = 1 if rc.graphicsEffect() is not None else 0
         strip.setGeometry(rc.x() + bg_left, rc.y() - gap,
-                          max(0, rc.width() - bg_left), gap)
+                          max(0, rc.width() - bg_left), gap + overlap)
         strip.raise_()
         strip.show()
 
@@ -1391,6 +1408,7 @@ class MainWindow(QMainWindow):
 
         current_elapsed, not elapsed: a running timer copies as it reads.
         """
+        fmt = self._state.settings.copy_format
         lines = []
         for row in self._state.rows:
             if row["type"] != "timer":
@@ -1398,7 +1416,8 @@ class MainWindow(QMainWindow):
             ts = self.timers.get(row["rowid"])
             if ts is None or ts.current_elapsed < 1:
                 continue
-            lines.append(f"{ts.name}: {format_time(ts.current_elapsed)}")
+            lines.append(f"{ts.name}: "
+                         f"{format_copy_time(ts.current_elapsed, fmt)}")
         return lines
 
     def _copy_session(self):
@@ -1417,7 +1436,8 @@ class MainWindow(QMainWindow):
         if rid not in self.timers:
             return
         ts = self.timers[rid]
-        time_str = format_time(ts.current_elapsed)
+        time_str = format_copy_time(ts.current_elapsed,
+                                    self._state.settings.copy_format)
         QApplication.clipboard().setText(time_str)
         self.show_toast(f"Time for {ts.name} ({time_str}) copied to clipboard",
                         2.5)
@@ -1520,6 +1540,13 @@ class MainWindow(QMainWindow):
         expand_all.setEnabled(any(g in collapsed for g in group_rids))
 
         menu.addSeparator()
+        # Only when something is actually running — otherwise it is a dead
+        # entry on every menu. Here rather than in the footer: starting is
+        # exclusive by default, so 0 or 1 timers run and the row's own button
+        # already covers the common case. This is for "I'm done, stop
+        # whatever is going" without hunting for the row.
+        running = self._running_rids()
+        stop_all = menu.addAction("Stop All Timers") if running else None
         set_time      = menu.addAction("Set Time") if is_timer else None
         reset_time    = menu.addAction("Reset Time") if is_timer else None
         if reset_time is not None:
@@ -1533,6 +1560,14 @@ class MainWindow(QMainWindow):
         if action is None:
             return
 
+        if stop_all is not None and action == stop_all:
+            # No rebuild: _stop_all calls _set_bold per row, which is already
+            # the one place the toggle button's label follows. Same shape as
+            # _on_stop, just plural.
+            self._stop_all()
+            self._save_state()
+            self._update_status()
+            return
         if action == reset_all:
             self._reset_all()
             return
@@ -1654,6 +1689,7 @@ class MainWindow(QMainWindow):
         s.confirm_delete       = dlg.chosen_confirm_delete
         s.confirm_reset        = dlg.chosen_confirm_reset
         s.recover_running_time = dlg.chosen_recover_running_time
+        s.copy_format          = dlg.chosen_copy_format
         old_dr_enabled = s.daily_reset_enabled
         old_dr_time    = s.daily_reset_time
         s.daily_reset_enabled  = dlg.chosen_daily_reset_enabled

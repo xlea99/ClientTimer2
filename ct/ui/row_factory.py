@@ -40,19 +40,29 @@ class RowFactory:
 
         # Calculate what the row_bg should be based on if its being dragged and/or if there's a user-set background color
         if is_dragging:
-            row_bg = blueprint.theme["row_drag_bg"]
+            # Group headers get their own drag colour for the same reason
+            # they get their own hover colour: a bordered box on group_bg
+            # starts from somewhere completely different than an open row on
+            # app_bg, so one shared tint cannot suit both.
+            row_bg = blueprint.theme["group_drag_bg"]
         else:
             row_bg = row.get("bg") or blueprint.theme["group_bg"]
 
         # Build the row's contaner
-        group_line = blueprint.theme["group_line"]
+        # The border is as much of the header as its fill — a 2px box that
+        # keeps its resting colour while the inside changes reads as the
+        # tint failing to take, the same way the row separator did on a
+        # dragged timer. So the line follows the state too.
+        group_line = (blueprint.theme["group_drag_line"] if is_dragging
+                      else blueprint.theme["group_line"])
         row_container = QWidget()
         row_container.setObjectName("rowBg")
         row_container.setStyleSheet(
             f"#rowBg {{ background-color: {row_bg}; {margin_css}"
             f" border: 2px solid {group_line}; }}"
             f" #rowBg[hov=\"1\"] {{"
-            f" background-color: {blueprint.theme['row_hover_bg']}; }}")
+            f" background-color: {blueprint.theme['group_hover_bg']};"
+            f" border-color: {blueprint.theme['group_hover_line']}; }}")
         row_container_layout = QHBoxLayout(row_container)
         row_container_layout.setContentsMargins(3, 3, 3, 3)
         row_container_layout.setSpacing(blueprint.h_spacing)
@@ -156,7 +166,15 @@ class RowFactory:
         rc.setObjectName("rowBg")
         # footer_line: this is the bottom-most row — its client separator is
         # replaced by the thick footer separator so the two don't stack.
-        if footer_line:
+        if is_dragging:
+            # A lifted row carries no separator. The line belongs to the LIST
+            # — it divides this row from the next one — and the dragged row
+            # has left the list. Kept, it paints a hard row_line edge along
+            # the bottom of a row that has otherwise gone to row_drag_bg,
+            # which on a high-contrast theme (95 Windows: teal drag on grey
+            # chrome) reads as the bottom pixel of the row failing to tint.
+            border_css = ""
+        elif footer_line:
             border_css = f"border-bottom: 2px solid {blueprint.theme['chrome_line']};"
         elif draw_separator_line:
             border_css = f"border-bottom: 1px solid {blueprint.theme['row_line']};"
