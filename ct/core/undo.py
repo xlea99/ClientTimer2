@@ -93,15 +93,34 @@ class ResetTimes(Command):
 
 @dataclass
 class ReorderRows(Command):
-    """A drag that rearranged the layout. Times are untouched by a reorder,
-    so restoring the whole list wholesale is safe here."""
+    """A drag that rearranged the layout.
+
+    Undoes the ORDER ONLY — it re-sorts whatever rows exist now, rather
+    than restoring the recorded list wholesale.
+
+    Wholesale restore was wrong because adding a client is not itself
+    undoable: drag a row, add a client, Ctrl+Z, and the new client was
+    dropped on the floor along with its time, since it did not exist in the
+    recorded list. Anything else edited in between (a rename, a colour) was
+    silently reverted too, which a reorder has no business touching.
+    """
 
     label: str
     rows: list
     collapsed: set = field(default_factory=set)
 
     def undo(self, state, timers, mode="revert"):
-        state.rows[:] = [dict(r) for r in self.rows]
+        rank = {r["rowid"]: i for i, r in enumerate(self.rows)}
+        # Rows the drag knew about, back in their recorded order...
+        known = sorted((r for r in state.rows if r["rowid"] in rank),
+                       key=lambda r: rank[r["rowid"]])
+        # ...then anything created since, appended. It has no recorded
+        # position, and the end is the only place that cannot displace a row
+        # whose position we are actively restoring.
+        extra = [r for r in state.rows if r["rowid"] not in rank]
+        state.rows[:] = known + extra
+        # Rows deleted since the drag are simply not resurrected — deletion
+        # has its own undo entry and this one must not fight it.
         state.collapsed_groups.clear()
         state.collapsed_groups.update(self.collapsed)
 

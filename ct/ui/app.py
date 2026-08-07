@@ -293,6 +293,23 @@ class MainWindow(QMainWindow):
                             if gap > 0:
                                 running_timers.append((ts, gap))
 
+                # Stop them NOW, before anything blocking happens.
+                #
+                # A timer restored with running_since is start()ed during
+                # __init__, so it is genuinely running from launch onward.
+                # The _save_state() below calls freeze(), which adds
+                # (now - launch) — and "now" is after a modal dialog the user
+                # may leave open indefinitely. That inflation lands in the
+                # PERMANENT session archive, and it happened on the Discard
+                # path too, so discarding did not discard.
+                #
+                # After running_timers is built, because that loop tests
+                # ts.running. Safe because every timer is reset a few lines
+                # below anyway; all this changes is that the archived numbers
+                # are the ones the dialog actually showed.
+                for ts in self.timers.values():
+                    ts.stop()
+
                 if running_timers:
                     lines = "\n".join(
                         f"  \u2022 {ts.name}:  {format_time(ts.elapsed)}"
@@ -1834,6 +1851,17 @@ class MainWindow(QMainWindow):
                 # Don't restore running_since — timers start stopped after restore
                 self.timers[rid] = TimerState(row["name"],
                                               elapsed=tt.get("elapsed", 0.0))
+            # The snapshot brought its own session_start with it. If that is
+            # older than today's reset boundary — which it is for anything
+            # taken before this morning — the next _tick fires the daily
+            # reset, archives what was just restored and zeroes it. Within a
+            # second. It reads as "restore is broken".
+            #
+            # max(), not assignment: a snapshot from later than the boundary
+            # keeps its own start, so this is a no-op in the common case and
+            # only ever moves the clock forward.
+            self._state.session_start = max(
+                self._state.session_start, self._most_recent_reset_boundary())
             summary = "Restored times and rows"
 
         self._next_rowid = max(

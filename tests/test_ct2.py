@@ -2213,6 +2213,109 @@ class TestQtSettingsDialog(QtWindowTestBase):
                     dlg._refresh_preview()
 
 
+class TestQtRestoreAndReset(QtWindowTestBase):
+    """A restored snapshot must not be eaten by the daily reset."""
+
+    def test_restore_clamps_session_start_past_the_boundary(self):
+        """A snapshot carries its own session_start. Anything taken before
+        this morning's boundary made the very next _tick archive and zero
+        what had just been restored — within a second."""
+        from datetime import timedelta
+        self.win._state.settings.daily_reset_enabled = True
+        boundary = self.win._most_recent_reset_boundary()
+        self.win._state.session_start = boundary - timedelta(days=3)
+        # The clamp the restore path applies.
+        self.win._state.session_start = max(
+            self.win._state.session_start,
+            self.win._most_recent_reset_boundary())
+        self.assertGreaterEqual(self.win._state.session_start, boundary)
+        # ...so the reset check is now a no-op.
+        before = [dict(r) for r in self.win._state.rows]
+        self.win._check_daily_reset_boundary()
+        self.assertEqual([r["rowid"] for r in self.win._state.rows],
+                         [r["rowid"] for r in before],
+                         "the daily reset fired on a freshly restored state")
+
+    def test_a_stale_session_start_would_have_triggered_it(self):
+        """Proves the clamp is load-bearing rather than decorative."""
+        from datetime import timedelta
+        self.win._state.settings.daily_reset_enabled = True
+        self.win.timers[11].elapsed = 500.0
+        self.win._state.session_start = (
+            self.win._most_recent_reset_boundary() - timedelta(days=3))
+        self.win._check_daily_reset_boundary()
+        self.assertEqual(self.win.timers[11].current_elapsed, 0,
+                         "expected the unclamped state to be zeroed")
+
+
+class TestReorderUndo(unittest.TestCase):
+    """Undoing a drag restores ORDER, and nothing else.
+
+    It used to replace state.rows with the recorded list wholesale. Adding a
+    client is not itself undoable, so drag -> add -> Ctrl+Z undid the drag
+    and took the new client with it: the row vanished, its timer was
+    orphaned, and the time was gone on next launch.
+    """
+
+    BEFORE = [{"rowid": 1, "name": "A"},
+              {"rowid": 2, "name": "B"},
+              {"rowid": 3, "name": "C"}]
+
+    class _State:
+        def __init__(self, rows):
+            self.rows = rows
+            self.collapsed_groups = set()
+
+    def cmd(self):
+        from ct.core.undo import ReorderRows
+        return ReorderRows("that reorder", [dict(r) for r in self.BEFORE], set())
+
+    def test_order_is_restored(self):
+        st = self._State([{"rowid": 3, "name": "C"}, {"rowid": 1, "name": "A"},
+                          {"rowid": 2, "name": "B"}])
+        self.cmd().undo(st, {})
+        self.assertEqual([r["rowid"] for r in st.rows], [1, 2, 3])
+
+    def test_a_row_added_after_the_drag_survives(self):
+        """The bug. Its time was lost on next launch."""
+        st = self._State([{"rowid": 3, "name": "C"}, {"rowid": 1, "name": "A"},
+                          {"rowid": 2, "name": "B"}, {"rowid": 9, "name": "NEW"}])
+        self.cmd().undo(st, {})
+        self.assertIn(9, [r["rowid"] for r in st.rows],
+                      "the row added after the drag was destroyed")
+
+    def test_rows_added_after_go_to_the_end(self):
+        """They have no recorded position, and the end is the only place
+        that cannot displace a row whose position is being restored."""
+        st = self._State([{"rowid": 9, "name": "NEW"}, {"rowid": 3, "name": "C"},
+                          {"rowid": 1, "name": "A"}, {"rowid": 2, "name": "B"}])
+        self.cmd().undo(st, {})
+        self.assertEqual([r["rowid"] for r in st.rows], [1, 2, 3, 9])
+
+    def test_later_edits_are_not_reverted(self):
+        """A reorder has no business undoing a rename or a colour."""
+        st = self._State([{"rowid": 2, "name": "B"}, {"rowid": 1, "name": "RENAMED"},
+                          {"rowid": 3, "name": "C", "bg": "#FF0000"}])
+        self.cmd().undo(st, {})
+        by_id = {r["rowid"]: r for r in st.rows}
+        self.assertEqual(by_id[1]["name"], "RENAMED")
+        self.assertEqual(by_id[3].get("bg"), "#FF0000")
+
+    def test_a_row_deleted_after_the_drag_is_not_resurrected(self):
+        """Deletion has its own undo entry; this one must not fight it."""
+        st = self._State([{"rowid": 1, "name": "A"}, {"rowid": 3, "name": "C"}])
+        self.cmd().undo(st, {})
+        self.assertNotIn(2, [r["rowid"] for r in st.rows])
+
+    def test_collapsed_groups_are_restored(self):
+        from ct.core.undo import ReorderRows
+        cmd = ReorderRows("r", [dict(r) for r in self.BEFORE], {2})
+        st = self._State([dict(r) for r in self.BEFORE])
+        st.collapsed_groups = {1}
+        cmd.undo(st, {})
+        self.assertEqual(st.collapsed_groups, {2})
+
+
 class TestQtDeleteButton(QtWindowTestBase):
     """X deletes, full stop.
 

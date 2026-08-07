@@ -21,6 +21,7 @@ Design rules this file follows:
     tenth patch release.
 """
 
+import http.client
 import json
 import urllib.error
 import urllib.request
@@ -60,7 +61,7 @@ def fetch_manifest(url=MANIFEST_URL, timeout=TIMEOUT_SECONDS):
         with urllib.request.urlopen(req, timeout=timeout) as response:
             data = json.loads(response.read().decode("utf-8"))
     except (urllib.error.URLError, urllib.error.HTTPError, OSError,
-            ValueError, TimeoutError) as exc:
+            http.client.HTTPException, ValueError, TimeoutError) as exc:
         log.info(f"Update check did not complete ({type(exc).__name__}). "
                  f"This is not an error.")
         return None
@@ -199,7 +200,7 @@ def download(url, dest_dir=None, timeout=120, sha256=None):
         else:
             log.info("Manifest carries no sha256; skipping checksum check.")
     except (urllib.error.URLError, urllib.error.HTTPError, OSError,
-            ValueError, TimeoutError) as exc:
+            http.client.HTTPException, ValueError, TimeoutError) as exc:
         log.warning(f"Update download failed: {type(exc).__name__}: {exc}")
         return None
     log.info(f"Update downloaded to '{path}' ({len(data):,} bytes).")

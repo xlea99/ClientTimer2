@@ -67,6 +67,7 @@ TIPS = (
     "Periodic backups are maintained that can be restored in General.",
     "Something broken? About -> Report a Problem sends me the details.",
     "Right-click the status line to jump to a running timer.",
+    "Timers can be saved and reset automatically at time specified in History."
 )
 
 # Slow on purpose. Long enough to finish reading and glance away, short
@@ -498,7 +499,7 @@ class ConfigDialog(QDialog):
             "    HH:MM:SS     05:15:00\n"
             "    Decimal      5.25\n"
             "    Raw Minutes  315\n\n"
-            "HH:MM and Raw Minutes drop any leftover seconds rather")
+            "HH:MM and Raw Minutes drop any leftover seconds")
         lbl.setFont(QFont("Calibri", 12, QFont.Bold))
         lbl.setToolTip(copy_format_tooltip)
         self._copy_fmt = QComboBox()
