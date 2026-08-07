@@ -2431,6 +2431,89 @@ class TestQtDeleteButton(QtWindowTestBase):
         self.assertIn(12, self.win.timers, "reset must not delete the row")
 
 
+class TestQtStickyToast(QtWindowTestBase):
+    """A toast that asks a question survives being covered.
+
+    There is one toast widget, so every new message replaced the last. The
+    update prompt stamps last_update_prompt the instant it appears, so a
+    2.5-second "copied to clipboard" could destroy it AND leave the app
+    believing it had asked — costing that user the day's update for one
+    unrelated click.
+    """
+
+    def setUp(self):
+        super().setUp()
+        del self.win.show_toast          # exercise the real widget
+        self.win.timers[11].elapsed = 60.0
+
+    def shown(self):
+        return (self.win._toast.text()
+                if self.win._toast_container.isVisible() else None)
+
+    def has_button(self):
+        return self.win._toast_action.isVisible()
+
+    def ask(self):
+        self.win._offer_update({"version": "9.9.9",
+                                "url": "https://example.com/x.exe"})
+        self.settle()
+
+    def test_a_transient_covers_the_question_then_gives_it_back(self):
+        self.ask()
+        self.assertIn("9.9.9", self.shown())
+        self.win._copy_timer_time(11)
+        self.settle()
+        self.assertNotIn("9.9.9", self.shown(), "the transient never showed")
+        self.win._on_fade_finished()
+        self.settle()
+        self.assertIn("9.9.9", self.shown(), "the question did not come back")
+        self.assertTrue(self.has_button(), "it came back without its button")
+
+    def test_dismissing_the_question_means_not_now(self):
+        """The X is the 'not now' answer. It must not boomerang."""
+        self.ask()
+        self.win._dismiss_toast()
+        self.settle()
+        self.win.show_toast("something else", 3)
+        self.settle()
+        self.win._on_fade_finished()
+        self.settle()
+        self.assertNotEqual(self.shown(), "the question came back after an X")
+        self.assertIsNone(self.win._sticky_toast)
+
+    def test_answering_the_question_clears_it(self):
+        self.ask()
+        fired = []
+        self.win._toast_action_cb = lambda: fired.append(1)
+        self.win._on_toast_action()
+        self.settle()
+        self.assertTrue(fired)
+        self.assertIsNone(self.win._sticky_toast)
+
+    def test_a_status_toast_is_not_a_question(self):
+        """'Downloading update...' is also seconds=0, but it reports rather
+        than asks. Bringing it back after the download finished would lie."""
+        self.win.show_toast("Downloading update...", 0)
+        self.settle()
+        self.assertIsNone(self.win._sticky_toast)
+
+    def test_a_newer_question_replaces_an_older_one(self):
+        self.ask()
+        self.win.show_toast("Different question", 0,
+                            action_text="Do It", on_action=lambda: None)
+        self.settle()
+        self.assertEqual(self.win._sticky_toast[0], "Different question")
+
+    def test_the_close_button_does_not_pass_its_checked_flag(self):
+        """clicked(bool) would bind False to clear_sticky and silently keep
+        the question alive after the user waved it away."""
+        self.ask()
+        self.win._toast_close.click()
+        self.settle()
+        self.assertIsNone(self.win._sticky_toast,
+                          "the X left the question parked")
+
+
 class TestQtStopAll(QtWindowTestBase):
     """'Stop All Timers' in the row context menu.
 

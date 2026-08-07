@@ -206,7 +206,7 @@ class MainWindow(QMainWindow):
         self._toast_close.setFixedWidth(_TOAST_CLOSE_W)
         self._toast_close.setCursor(Qt.PointingHandCursor)
         self._toast_close.setToolTip("Dismiss")
-        self._toast_close.clicked.connect(self._dismiss_toast)
+        self._toast_close.clicked.connect(lambda: self._dismiss_toast())
         bar_lay.addWidget(self._toast_close)
 
         self._toast = QLabel()
@@ -226,6 +226,10 @@ class MainWindow(QMainWindow):
         self._toast_action.clicked.connect(self._on_toast_action)
         bar_lay.addWidget(self._toast_action)
         self._toast_action_cb = None
+        # An unanswered question toast, parked while something
+        # transient covers it. See show_toast.
+        self._sticky_toast  = None
+        self._showing_sticky = False
 
         toast_lay.addWidget(self._toast_bar)
 
@@ -2527,6 +2531,15 @@ class MainWindow(QMainWindow):
                  - margins.right() - _TOAST_CLOSE_W)
         if avail > 50:
             self._toast.setMaximumWidth(avail)
+        # A toast that asks something AND never fades is a question. Park
+        # it, so a routine "copied to clipboard" can cover it for a moment
+        # without answering it on the user's behalf. Only toasts with an
+        # action qualify: "Downloading update..." also has seconds=0, but it
+        # reports rather than asks, and bringing it back would be a lie.
+        is_sticky = (seconds == 0 and action_text is not None)
+        if is_sticky:
+            self._sticky_toast = (message, action_text, on_action)
+        self._showing_sticky = is_sticky
         self._set_toast_visible(True)
         if seconds > 0:
             self._toast_timer.start(int(seconds * 1000))
@@ -2686,12 +2699,36 @@ class MainWindow(QMainWindow):
         self._toast_fade.setStartValue(1.0)
         self._toast_fade.setEndValue(0.0)
         self._toast_fade.setEasingCurve(QEasingCurve.OutCubic)
-        self._toast_fade.finished.connect(self._dismiss_toast)
+        self._toast_fade.finished.connect(self._on_fade_finished)
         self._toast_fade.start()
 
-    def _dismiss_toast(self):
+    def _on_fade_finished(self):
+        """A transient just expired. Put back any question it was covering.
+
+        The update prompt stamps last_update_prompt the moment it appears,
+        so once it is gone the user is not asked again for a day. Letting a
+        2.5-second "copied to clipboard" destroy it meant a single click
+        could silently cost someone that day's update — and the app had
+        recorded that it asked.
+        """
+        sticky = self._sticky_toast
+        if sticky is not None and not self._showing_sticky:
+            self._dismiss_toast(clear_sticky=False)
+            message, action_text, on_action = sticky
+            self.show_toast(message, 0, action_text=action_text,
+                            on_action=on_action)
+            return
+        self._dismiss_toast()
+
+    def _dismiss_toast(self, clear_sticky=True):
         # Also reachable from the X, mid-countdown — kill both the pending
         # fade and the timer that would have started one.
+        # clear_sticky=False is only for re-showing a parked question; every
+        # other route here means the question is done with, whether it was
+        # answered or waved away.
+        if clear_sticky:
+            self._sticky_toast = None
+            self._showing_sticky = False
         self._toast_timer.stop()
         fade, self._toast_fade = self._toast_fade, None
         if fade is not None:
