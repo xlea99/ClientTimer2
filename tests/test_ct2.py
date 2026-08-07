@@ -2248,6 +2248,60 @@ class TestQtRestoreAndReset(QtWindowTestBase):
                          "expected the unclamped state to be zeroed")
 
 
+class TestUnknownChoiceReset(unittest.TestCase):
+    """A setting naming a THING must name a thing that exists.
+
+    _coerce_setting validates types, so a retired theme name survives load
+    as a perfectly good string and only RENDERING falls back. The stored
+    name stayed dead — and the settings dialog's setCurrentText then matched
+    nothing, leaving the combo on index 0. Pressing Apply on an unrelated
+    change silently switched the user to whatever theme sorts first.
+    """
+
+    def reset(self, **overrides):
+        from ct.core.config import Settings
+        from ct.ui.app import MainWindow
+        s = Settings(**overrides)
+        keys = MainWindow._reset_unknown_choices(s)
+        return s, keys
+
+    def test_a_retired_theme_becomes_the_default(self):
+        s, keys = self.reset(theme="Some Old Theme")
+        self.assertEqual(s.theme, "E-Ink (Default)")
+        self.assertIn("theme", keys)
+
+    def test_a_live_theme_is_untouched(self):
+        s, keys = self.reset(theme="Galaxy Dark")
+        self.assertEqual(s.theme, "Galaxy Dark")
+        self.assertEqual(keys, [])
+
+    def test_size_font_and_alignment_too(self):
+        """Same shape, same silent-fallback-to-index-0 failure."""
+        s, keys = self.reset(size="Gigantic", font="Papyrus",
+                             label_align="Sideways")
+        self.assertEqual(s.size, "Regular")
+        self.assertEqual(s.font, "Calibri")
+        self.assertEqual(s.label_align, "Left")
+        self.assertEqual(set(keys), {"size", "font", "label_align"})
+
+    def test_every_default_is_itself_valid(self):
+        """If a default ever named something retired, every launch would
+        'reset' to a value that gets reset again."""
+        from ct.core.config import Settings
+        s, keys = self.reset()
+        self.assertEqual(keys, [], f"the shipped defaults are invalid: {keys}")
+
+    def test_a_renamed_theme_migrates_rather_than_resetting(self):
+        """The rename map runs first, so a renamed theme must survive this
+        untouched — resetting it would defeat the migration entirely."""
+        from ct.core.config import Settings
+        from ct.ui.app import MainWindow
+        s = Settings.from_dict({"theme": "T-Magentle"})
+        keys = MainWindow._reset_unknown_choices(s)
+        self.assertEqual(s.theme, "T-Magenta")
+        self.assertEqual(keys, [])
+
+
 class TestReorderUndo(unittest.TestCase):
     """Undoing a drag restores ORDER, and nothing else.
 

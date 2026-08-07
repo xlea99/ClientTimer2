@@ -38,7 +38,8 @@ from ct.core.undo import (DeleteRow, RenameRow, ReorderRows, ResetTimes,
                           UndoStack)
 from ct.ui.dialogs import ConfigDialog
 from ct.ui.drag import DragController
-from ct.ui.theme import THEMES, SIZES, build_stylesheet, build_menu_stylesheet
+from ct.ui.theme import (THEMES, SIZES, FONTS, build_stylesheet,
+                         build_menu_stylesheet)
 from ct.ui.ui_blueprint import UIBlueprint
 from ct.ui.row_factory import RowFactory
 from ct.ui.widgets import TickCheckBox
@@ -95,11 +96,15 @@ class MainWindow(QMainWindow):
         # window flags directly — avoids a second HWND creation (and visible
         # flash) that setWindowFlags() would cause after the fact.
         state = AppState.load()
+        # Local, not self.: this runs before super().__init__(), and assigning
+        # an attribute on a QObject before that raises.
+        reset_choices = self._reset_unknown_choices(state.settings)
         flags = Qt.Window
         if state.settings.always_on_top:
             flags |= Qt.WindowStaysOnTopHint
         super().__init__(flags=flags)
         self._state = state
+        self._reset_choices = reset_choices
 
         self.setWindowTitle("Client Timer 2")
         self.setWindowIcon(QIcon(str(PATHS.assets / "icon.ico")))
@@ -277,6 +282,23 @@ class MainWindow(QMainWindow):
             self._pending_toast = (
                 "Some saved settings couldn't be read and were adjusted. See log for more info")
 
+        # 1. A setting naming something retired was reset at load. Worth
+        #    saying out loud: the user picked that theme deliberately, and
+        #    silently landing on a different one reads as the app losing
+        #    their settings. More specific than the message above, so it
+        #    takes precedence over it; the daily-reset toast still wins over
+        #    both, being about their actual time rather than their colours.
+        if getattr(self, "_reset_choices", []):
+            from ct.core.config import _SETTINGS_DEFAULTS
+            if self._reset_choices == ["theme"]:
+                self._pending_toast = (
+                    f"Your saved theme no longer exists - now using "
+                    f"{_SETTINGS_DEFAULTS['theme']}")
+            else:
+                self._pending_toast = (
+                    "Some saved appearance settings no longer exist and were "
+                    "reset to defaults")
+
         # Daily reset catch-up — if the app was closed and we missed a
         #    reset boundary, save the old session and zero out timers.
         if self._state.settings.daily_reset_enabled:
@@ -364,6 +386,42 @@ class MainWindow(QMainWindow):
     # ------------------------------------------------------------------ #
     #  Style                                                               #
     # ------------------------------------------------------------------ #
+
+    @staticmethod
+    def _reset_unknown_choices(settings):
+        """Force settings that name a THING to name a thing that exists.
+
+        _coerce_setting checks TYPES, so a retired theme name survives load
+        as a perfectly good string. Rendering then falls back to the default
+        via THEMES.get(...), which looks fine — but the setting still holds
+        the dead name, and that gap is where the jank lives:
+
+          * the app renders as E-Ink while `theme` says "Some Old Theme"
+          * the settings dialog calls setCurrentText("Some Old Theme"), which
+            matches no item, so the combo sits on index 0 — "95 Windows"
+          * Apply commits index 0, and the user is flashbanged into a theme
+            they never picked, by pressing Apply on an unrelated change
+
+        Resolving it here means the rendered theme and the stored theme are
+        never allowed to disagree in the first place. Returns the keys it
+        reset, so the caller can say so.
+        """
+        from ct.core.config import _SETTINGS_DEFAULTS
+        vocab = {
+            "theme":       set(THEMES),
+            "size":        set(SIZES),
+            "font":        set(FONTS),
+            "label_align": {"Left", "Center", "Right"},
+        }
+        reset = []
+        for key, allowed in vocab.items():
+            if getattr(settings, key, None) not in allowed:
+                bad = getattr(settings, key, None)
+                setattr(settings, key, _SETTINGS_DEFAULTS[key])
+                log.warning(f"Setting '{key}' was {bad!r}, which no longer "
+                            f"exists - reset to {_SETTINGS_DEFAULTS[key]!r}.")
+                reset.append(key)
+        return reset
 
     def _apply_style(self):
         style = build_stylesheet(self._state.settings.theme)
@@ -1061,7 +1119,7 @@ class MainWindow(QMainWindow):
         self._try_snapshot(reason="layout_change", priority="medium")
         self._rebuild_rows()
         self._shrink_to_fit()
-        self.show_toast(f"Deleted group '{name}' — Ctrl+Z to undo", 5)
+        self.show_toast(f"Deleted group '{name}' (Ctrl+Z to undo)", 5)
 
     def _on_group_toggle(self, rowid):
         if rowid in self._state.collapsed_groups:
@@ -1092,7 +1150,7 @@ class MainWindow(QMainWindow):
         self._try_snapshot(reason="layout_change", priority="medium")
         self._rebuild_rows()
         self._shrink_to_fit()
-        self.show_toast(f"Deleted '{name}' — Ctrl+Z to undo", 5)
+        self.show_toast(f"Deleted '{name}' (Ctrl+Z to undo)", 5)
 
     def _on_rearrange_toggle(self):
         self._rearranging = not self._rearranging
@@ -1675,7 +1733,7 @@ class MainWindow(QMainWindow):
             self._shrink_to_fit()
             label = "" if is_timer else "group "
             self.show_toast(
-                f"Deleted {label}'{row['name']}' — Ctrl+Z to undo", 5)
+                f"Deleted {label}'{row['name']}' (Ctrl+Z to undo)", 5)
 
     @staticmethod
     def _parse_time_input(text):
@@ -1826,7 +1884,7 @@ class MainWindow(QMainWindow):
             new_state = AppState.load(path)
         except Exception:
             log.exception(f"Failed to restore from snapshot '{path}'.")
-            self.show_toast("Restore failed — current state unchanged", 5)
+            self.show_toast("Restore failed - current state unchanged", 5)
             return
         # Every mode below overwrites live data, so bank what's here first.
         self._try_snapshot(reason="pre_restore", priority="high")
@@ -1926,7 +1984,7 @@ class MainWindow(QMainWindow):
         self._update_parent_group_time(rowid)
         self._save_state()
         self._update_status()
-        self.show_toast(f"Reset '{name}' — Ctrl+Z to undo", 5)
+        self.show_toast(f"Reset '{name}' (Ctrl+Z to undo)", 5)
 
     def _reset_all(self):
         if not self._confirm_reset("Reset ALL times to zero?"):
@@ -1942,7 +2000,7 @@ class MainWindow(QMainWindow):
             ts.reset()
         self._save_state()
         self._rebuild_rows()
-        self.show_toast("Reset all times to zero — Ctrl+Z to undo", 5)
+        self.show_toast("Reset all times to zero (Ctrl+Z to undo)", 5)
 
     # ------------------------------------------------------------------ #
     #  Display helpers                                                     #
@@ -2590,7 +2648,7 @@ class MainWindow(QMainWindow):
 
     def _install_update(self, path):
         if path is None:
-            self.show_toast("Update download failed — try again later", 6)
+            self.show_toast("Update download failed - please try again later", 6)
             return
         # Save BEFORE handing off. Restart Manager closes the app for us, and
         # relying on closeEvent firing correctly under an RM-initiated close

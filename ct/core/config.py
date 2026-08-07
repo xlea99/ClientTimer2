@@ -309,12 +309,18 @@ class AppState:
 
         # Hydrate the validated dict into typed fields
         settings  = Settings.from_dict(state["settings"])
-        # RETIRED themes are not tracked: a saved theme that no longer
-        # exists falls back to the default at render time, and the cost is
-        # one person re-picking something that is gone either way. RENAMED
-        # themes ARE tracked, in Settings._THEME_RENAMES — that theme still
-        # exists and looks the same, so resetting them off it loses them
-        # something for no reason.
+        # RETIRED themes are not tracked here: the cost is one person
+        # re-picking something that is gone either way. RENAMED themes ARE
+        # tracked, in Settings._THEME_RENAMES — that theme still exists and
+        # looks the same, so resetting them off it loses them something for
+        # no reason.
+        #
+        # A name that survives both (genuinely retired) is reset to the
+        # default by MainWindow._reset_unknown_choices at load. Note it is
+        # RESET, not merely rendered as the default: leaving the dead name in
+        # the setting made the settings dialog's combo fall to index 0, so
+        # pressing Apply on an unrelated change silently switched the user's
+        # theme to whatever sorts first.
         rows      = list(state["layout"]["rows"])
         collapsed = set(state["layout"]["collapsed_groups"])
         try:
