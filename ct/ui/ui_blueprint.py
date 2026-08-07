@@ -16,6 +16,7 @@ class UIBlueprint:
     start_min_w: int
     min_name_w: int
     min_time_w: int
+    adj_w: int
     indent_px: int
     time_font: QFont
     action_font: QFont
@@ -72,6 +73,13 @@ class UIBlueprint:
         else:
             min_name_w = 80
 
+        # Width of the -5/+5 cluster. The group header reserves exactly this
+        # much so its X lines up with the timer rows' when the buttons are on.
+        _ref_adj = QPushButton("-5")
+        _ref_adj.setFont(action_font)
+        adj_w = _ref_adj.sizeHint().width() * 2 + button_spacing
+        _ref_adj.deleteLater()
+
         bold_time = QFont(font_family, size["time"])
         bold_time.setBold(True)
         min_time_w = QFontMetrics(bold_time).horizontalAdvance("00:00:00 ")
@@ -81,7 +89,7 @@ class UIBlueprint:
             h_spacing=horizontal_spacing, btn_spacing=button_spacing,
             col0_size=col0_size, col5_size=col5_size,
             start_min_w=start_min_w, min_name_w=min_name_w,
-            min_time_w=min_time_w, indent_px=indent_px,
+            min_time_w=min_time_w, adj_w=adj_w, indent_px=indent_px,
             time_font=time_font, action_font=action_font,
             bold_label_font=bold_label, bold_time_font=bold_time,
             has_mdl2=has_mdl2,

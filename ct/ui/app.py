@@ -622,6 +622,7 @@ class MainWindow(QMainWindow):
                         is_dragging=self._drag.dragging_rid == rid,
                         collapsed=collapsed, has_running=has_running,
                         show_count=ss.show_group_count, show_time=ss.show_group_time,
+                        show_adjust=ss.show_adjust_buttons,
                         show_x=self._rearranging,
                         on_toggle=self._on_group_toggle,
                         on_remove=self._on_remove_group,

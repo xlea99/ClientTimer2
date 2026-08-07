@@ -68,6 +68,7 @@ class RowFactory:
                             has_running: bool,
                             show_count: bool,
                             show_time: bool,
+                            show_adjust: bool,
                             is_dragging: bool,
                             show_x: bool,
                             on_toggle: Callable[...,Any],
@@ -129,12 +130,17 @@ class RowFactory:
         row_container_layout.addWidget(name_lbl)
 
         # Col 2: child count
-        count_lbl = QLabel(f"({len(children)})")
+        # Col 2 is the Start button on a timer row. The count takes exactly
+        # that width so the TIME column lands at the same x in both — a
+        # shared column geometry rather than two layouts that happen to
+        # start alike. Blanked rather than hidden when the count is off: a
+        # hidden widget surrenders its width and the columns fall out of
+        # step again.
+        count_lbl = QLabel(f"({len(children)})" if show_count else "")
         count_lbl.setFont(blueprint.action_font)
         count_lbl.setAlignment(Qt.AlignCenter)
+        count_lbl.setFixedWidth(blueprint.start_min_w)
         count_lbl.setStyleSheet(f"color: {blueprint.theme['group_fg']};")
-        if not show_count:
-            count_lbl.setVisible(False)
         row_container_layout.addWidget(count_lbl)
 
         # Col 3: aggregate time
@@ -147,12 +153,21 @@ class RowFactory:
         time_lbl.setFixedWidth(blueprint.min_time_w)
         time_lbl.setStyleSheet(f"color: {fg};")
         if not show_time:
-            time_lbl.setVisible(False)
+            time_lbl.setText("")          # blank, not hidden — see col 2
         row_container_layout.addWidget(time_lbl)
 
-        # Col 4: spacer
-        spacer = QLabel("")
-        row_container_layout.addWidget(spacer)
+        # Col 4: reserve exactly the -5/+5 cluster a timer row carries, so
+        # the X below lines up with theirs. Zero when those buttons are off,
+        # since then no timer row has them either.
+        adj_gap = QWidget()
+        adj_gap.setFixedWidth(blueprint.adj_w)
+        adj_gap.setStyleSheet("background: transparent;")
+        row_container_layout.addWidget(adj_gap)
+        adj_gap.setVisible(show_adjust)
+        # HIDDEN, not zero-width. A visible zero-width widget still collects
+        # the layout's spacing on both sides, which put the group's X four
+        # pixels off the timers'. A hidden one is skipped outright — exactly
+        # what happens to the timer row's own adjust container.
 
         # Col 5: delete
         x_btn = QPushButton("X")
@@ -161,6 +176,12 @@ class RowFactory:
         x_btn.clicked.connect(lambda _=False: on_remove(rid))
         row_container_layout.addWidget(x_btn)
         x_btn.setVisible(show_x)
+        # Slack goes AFTER the X, so the row reads as one block against the
+        # left and any surplus window width sits at the far edge. Before the
+        # X it pooled between the time and the X, which is a hole in the
+        # middle of the row — very visible unlocked, where the footer's edit
+        # controls make the window much wider than the rows need.
+        row_container_layout.addStretch(1)
 
         widget_dict = {
             "name": name_lbl, "time": time_lbl,
@@ -237,8 +258,14 @@ class RowFactory:
         # buttons sit directly on the line. Gap is per-size ("line_gap").
         # force_line_gap applies it regardless (used in rearrange mode so all
         # rows share one height and dragging never resizes anything).
+        #
+        # RIGHT margin matches the separator's row_pad so the two X buttons
+        # line up in edit mode. Insetting the timer rather than flushing the
+        # separator, because the separator is a bordered box: pushing its X
+        # out to the edge would slide it under its own 2px border.
         rc_lay.setContentsMargins(
-            0, 0, 0,
+            blueprint.size.get("row_pad", 3), 0,
+            blueprint.size.get("row_pad", 3),
             blueprint.size.get("line_gap", 0)
             if (draw_separator_line or footer_line or force_line_gap) else 0)
         rc_lay.setSpacing(blueprint.h_spacing)
@@ -316,6 +343,9 @@ class RowFactory:
         # the lock. A row full of X buttons is also the loudest possible signal
         # that edit mode is on, which a small lock glyph never was.
         x_btn.setVisible(show_x)
+        # Same as the group row: slack after the X, never between the time
+        # and the X.
+        rc_lay.addStretch(1)
 
         widget_dict = {
             "name": name_lbl, "time": time_lbl,
@@ -372,8 +402,18 @@ class RowFactory:
 
         add_input = QLineEdit()
         add_input.setFont(footer_font)
-        add_input.setPlaceholderText("Client name...")
+        add_input.setPlaceholderText("Name...")
         add_input.returnPressed.connect(on_add_input_return)
+        # Ignored width: it already has a stretch factor, so it FILLS the
+        # footer — but its own sizeHint (~200px) was still being demanded,
+        # and the footer is what sets the window's minimum width. That made
+        # the unlocked window wider than the rows, leaving dead space to the
+        # right of every one. Ignored means "give me what is left", which is
+        # what a fill-the-rest field actually wants. The minimum keeps it
+        # usable when there is little left to give.
+        add_input.setSizePolicy(QSizePolicy.Ignored,
+                                add_input.sizePolicy().verticalPolicy())
+        add_input.setMinimumWidth(60)
 
         # Edit page: everything to do with authoring the list.
         edit_page = QWidget()
