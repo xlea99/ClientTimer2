@@ -40,6 +40,20 @@ def build_stylesheet(theme_name):
         f"  background-color: {t['control_bg']};"
         f"  selection-background-color: {t['control_hover_bg']};"
         f"  selection-color: {act_fg};"
+        # Kills the focus rectangle Qt draws around the current row, which
+        # showed as a stray outline that did not line up with the row's fill.
+        f"  outline: none;"
+        f"}}"
+        # selection-* above only covers the CURRENT item (what the keyboard
+        # is on). Mousing over a different row is a separate state, and
+        # unstyled it falls through to whatever the platform style paints —
+        # which is why the hover never popped. Both are spelled out so the
+        # row looks the same however you arrived at it.
+        f"QComboBox QAbstractItemView::item {{ border: none; }}"
+        f"QComboBox QAbstractItemView::item:hover,"
+        f"QComboBox QAbstractItemView::item:selected {{"
+        f"  background-color: {t['control_hover_bg']};"
+        f"  color: {act_fg};"
         f"}}"
         f"QSpinBox, QTimeEdit {{"
         f"  color: {t['control_fg']};"

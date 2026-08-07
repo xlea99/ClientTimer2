@@ -54,17 +54,19 @@ TIPS = (
     "Click any timer's time to copy just that one.",
     "Click any timer row in a historical saved session to copy its time.",
     "Double-click a row's name to rename it in place.",
-    "Right-click a row for Set Time, colors, and more.",
+    "Right-click a row for Set Time, custom colors, and more.",
     "Shift-click Start to run a timer alongside the others.",
     "Hold Shift when clicking time adjusts for 1 minute increments instead of 5.",
     "Click the footer status line to copy every time at once.",
     "Ctrl+Z undoes deletes, resets, renames and reorders.",
     "Height can be shrunken from the maximum, and will persist (with scroll).",
     "Unlock the UI (bottom left) to add, rearrange, and delete rows.",
-    "Past sessions live under History. Backups live under General.",
+    "Past sessions are saved at Reset Time under History.",
     "Copy Format, under General, decides how times reach your clipboard.",
-    "More than 20 themes are available in Appearance to improve your visual experience.",
-    "CT2 maintains backups for unexpected interruptions. Restore them in General.",
+    "More than 20 themes exist in Appearance to improve your visual experience.",
+    "Periodic backups are maintained that can be restored in General.",
+    "Something broken? About -> Report a Problem sends me the details.",
+    "Right-click the status line to jump to a running timer.",
 )
 
 # Slow on purpose. Long enough to finish reading and glance away, short

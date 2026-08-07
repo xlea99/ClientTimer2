@@ -2213,6 +2213,67 @@ class TestQtSettingsDialog(QtWindowTestBase):
                     dlg._refresh_preview()
 
 
+class TestQtDeleteButton(QtWindowTestBase):
+    """X deletes, full stop.
+
+    It used to reset the timer instead when Shift was held, relabelling
+    itself to "0" — a leftover from when X sat on every row permanently.
+    Once X became edit-mode-only, a modifier on an already-hidden button was
+    unfindable, and the two outcomes were wildly mismatched: mistime the
+    Shift and you delete a row when you meant to zero it.
+    """
+
+    def test_x_never_relabels_on_shift(self):
+        for held in (False, True):
+            with self.subTest(shift=held):
+                self.win._shift_held = held
+                self.win._update_shift_labels()
+                self.assertEqual(self.win._widgets[11]["x"].text(), "X")
+
+    def test_x_stays_x_when_rebuilt_while_shift_is_held(self):
+        """RowFactory builds the label too, so the constant lived in two
+        places; a rebuild mid-Shift was the path that kept the old one."""
+        self.win._shift_held = True
+        self.rebuild()
+        self.assertEqual(self.win._widgets[11]["x"].text(), "X")
+        self.win._shift_held = False
+
+    def test_adjust_buttons_still_follow_shift(self):
+        """Only X was un-wired. ±1/±5 is a live feature."""
+        self.win._shift_held = True
+        self.win._update_shift_labels()
+        self.assertEqual(self.win._widgets[11]["minus"].text(), "-1")
+        self.assertEqual(self.win._widgets[11]["plus"].text(), "+1")
+        self.win._shift_held = False
+        self.win._update_shift_labels()
+        self.assertEqual(self.win._widgets[11]["minus"].text(), "-5")
+
+    def test_remove_ignores_keyboard_modifiers_entirely(self):
+        """The strongest form of the assertion: _on_remove no longer READS
+        the modifier state, so no amount of Shift can divert it."""
+        import inspect
+        src = inspect.getsource(self.win._on_remove.__func__)
+        self.assertNotIn("ShiftModifier", src)
+        self.assertNotIn("keyboardModifiers", src)
+
+    def test_x_deletes_the_row(self):
+        self.win.timers[11].elapsed = 300.0
+        self.win._state.settings.confirm_delete = False
+        before = len(self.win._state.rows)
+        self.win._on_remove(11)
+        self.assertEqual(len(self.win._state.rows), before - 1)
+        self.assertNotIn(11, self.win.timers)
+
+    def test_reset_time_is_still_reachable(self):
+        """Killing the gesture must not kill the capability — it moved to
+        the right-click menu, which says what it does."""
+        self.win.timers[12].elapsed = 300.0
+        self.win._state.settings.confirm_reset = False
+        self.win._reset_one(12)
+        self.assertEqual(self.win.timers[12].current_elapsed, 0)
+        self.assertIn(12, self.win.timers, "reset must not delete the row")
+
+
 class TestQtStopAll(QtWindowTestBase):
     """'Stop All Timers' in the row context menu.
 

@@ -264,7 +264,9 @@ class RowFactory:
         adj_container.setVisible(show_adjust)
 
         # Col 5: X / 0
-        x_btn = QPushButton("0" if shift_held else "X")
+        # Always X. Shift used to turn it into "0" for reset-instead-of-delete;
+        # that went away with the behaviour it advertised — see _on_remove.
+        x_btn = QPushButton("X")
         x_btn.setFont(blueprint.action_font)
         x_btn.setFixedWidth(blueprint.col5_size.width())
         x_btn.clicked.connect(lambda _=False: on_remove(rid))

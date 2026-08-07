@@ -734,7 +734,8 @@ class MainWindow(QMainWindow):
             w["plus"].setText("+1" if sh else "+5")
             running = rid in self.timers and self.timers[rid].running
             w["toggle"].setText(self._toggle_label(running))
-            w["x"].setText("0" if sh else "X")
+            # X does NOT change on Shift any more — see _on_remove. It stays
+            # X because that is the only thing it does.
 
     # ------------------------------------------------------------------ #
     #  Undo                                                                #
@@ -1055,22 +1056,26 @@ class MainWindow(QMainWindow):
         self._shrink_to_fit()
 
     def _on_remove(self, rowid):
-        if QApplication.keyboardModifiers() & Qt.ShiftModifier:
-            self._reset_one(rowid)
-        else:
-            name = next(
-                (r["name"] for r in self._state.rows if r["rowid"] == rowid), "")
-            if not self._confirm_delete(f"Delete '{name}'?"):
-                return
-            self._push_delete_undo(rowid)
-            self.timers[rowid].stop()
-            del self.timers[rowid]
-            self._state.rows = [r for r in self._state.rows if r["rowid"] != rowid]
-            self._save_state()
-            self._try_snapshot(reason="layout_change", priority="medium")
-            self._rebuild_rows()
-            self._shrink_to_fit()
-            self.show_toast(f"Deleted '{name}' — Ctrl+Z to undo", 5)
+        # X deletes. It used to reset the timer instead when Shift was held,
+        # relabelling itself to "0" — a leftover from when X was permanently
+        # on every row. It stopped making sense once X appeared only in edit
+        # mode: a modifier on an already-hidden button is unfindable, and the
+        # two outcomes are wildly mismatched. Mistime the Shift and you
+        # delete a row when you meant to zero it. Reset Time lives in the
+        # right-click menu, which says what it does.
+        name = next(
+            (r["name"] for r in self._state.rows if r["rowid"] == rowid), "")
+        if not self._confirm_delete(f"Delete '{name}'?"):
+            return
+        self._push_delete_undo(rowid)
+        self.timers[rowid].stop()
+        del self.timers[rowid]
+        self._state.rows = [r for r in self._state.rows if r["rowid"] != rowid]
+        self._save_state()
+        self._try_snapshot(reason="layout_change", priority="medium")
+        self._rebuild_rows()
+        self._shrink_to_fit()
+        self.show_toast(f"Deleted '{name}' — Ctrl+Z to undo", 5)
 
     def _on_rearrange_toggle(self):
         self._rearranging = not self._rearranging
@@ -2732,6 +2737,9 @@ class MainWindow(QMainWindow):
 
 def main():
     app = QApplication(sys.argv)
+    # No setStyle() — the platform default stays. Forcing Fusion was tried
+    # and reverted: it fixed combo-popup chrome but restyled every native
+    # widget in the app, which was a far bigger change than the problem.
     window = MainWindow()
     window.show()
     sys.exit(app.exec())
