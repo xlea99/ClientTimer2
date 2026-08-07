@@ -67,7 +67,7 @@ TIPS = (
     "Periodic backups are maintained that can be restored in General.",
     "Something broken? About -> Report a Problem sends me the details.",
     "Right-click the status line to jump to a running timer.",
-    "Timers can be saved and reset automatically at time specified in History."
+    "Timers can be saved and reset automatically at a time specified in History."
 )
 
 # Slow on purpose. Long enough to finish reading and glance away, short
