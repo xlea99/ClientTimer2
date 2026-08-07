@@ -135,6 +135,14 @@ class MainWindow(QMainWindow):
         # snapshot is ~2.5 KB, and a rapid run of deletes/resets deserves a
         # restore point each rather than one shared between them.
         self._snapshot_debounce  = 2.0
+        # Seconds between IDLE snapshots — the heartbeat taken because time
+        # passed, with nothing happening. A tuning value, not a preference:
+        # it used to be a "Backup Interval" setting and was removed because
+        # nothing a user could reason about depended on it. Crash safety is
+        # state.json (rewritten every 20 ticks), and history depth is the
+        # tier ladder in snapshot.py — neither is affected by this. All it
+        # changes is how densely the newest-20 buffer is packed.
+        self._snapshot_idle_secs = 5 * 60
 
         # -- Pre-UI startup checks --
         self._startup_checks()
@@ -1700,7 +1708,6 @@ class MainWindow(QMainWindow):
         if (s.daily_reset_enabled
                 and (not old_dr_enabled or s.daily_reset_time != old_dr_time)):
             self._state.session_start = datetime.now().astimezone()
-        s.snapshot_min_minutes = dlg.chosen_snapshot_min_minutes
         s.show_adjust_buttons  = dlg.chosen_show_adjust_buttons
 
         self._save_state()
@@ -2657,7 +2664,7 @@ class MainWindow(QMainWindow):
 
     def _try_snapshot(self, reason, priority="low"):
         now = time.monotonic()
-        min_secs = self._state.settings.snapshot_min_minutes * 60
+        min_secs = self._snapshot_idle_secs
         if ((priority == "low" and now - self._last_snapshot_time > min_secs)
                 or (priority == "medium" and now - self._last_snapshot_time > self._snapshot_debounce)
                 or priority == "high"):

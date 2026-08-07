@@ -69,7 +69,6 @@ class Settings:
     confirm_reset:        bool = True
     daily_reset_enabled:  bool = True
     daily_reset_time:     str  = "03:00"
-    snapshot_min_minutes: int  = 5
     show_adjust_buttons:  bool = True
     recover_running_time: bool = True
     # What a copy puts on the clipboard. The row on screen is always

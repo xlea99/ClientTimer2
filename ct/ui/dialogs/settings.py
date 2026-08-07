@@ -4,7 +4,8 @@ import json
 import re
 from datetime import datetime
 from pathlib import Path
-from PySide6.QtCore import Qt, QTime, QUrl, Signal
+import random
+from PySide6.QtCore import Qt, QTime, QTimer, QUrl, Signal
 from PySide6.QtGui import QDesktopServices, QFont, QFontMetrics
 from PySide6.QtWidgets import (
     QPlainTextEdit,
@@ -23,7 +24,6 @@ from PySide6.QtWidgets import (
     QPushButton,
     QScrollArea,
     QSizePolicy,
-    QSpinBox,
     QStackedWidget,
     QTableWidget,
     QTableWidgetItem,
@@ -32,6 +32,49 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 from ct.common.setup import PATHS
+
+# ---------------------------------------------------------------------------
+# Tips
+# ---------------------------------------------------------------------------
+# Almost everything this app can do is a gesture with no affordance: clicking
+# a time, double-clicking a name, Shift for a different step size. Nobody
+# discovers those on their own, and the app's whole point is not interrupting
+# people, so the teaching has to be somewhere they already go rather than
+# something that arrives uninvited.
+#
+# Settings is that place. Themes and the session history both live here, so
+# every user ends up in this dialog on their own steam. The strip sits below
+# the page stack, which means it shows on EVERY page without any page having
+# to know about it.
+#
+# Keep each line SHORT - one line at the dialog's width, no wrapping, so the
+# strip can never change height and jostle the dialog while it cycles. There
+# is a test for it.
+TIPS = (
+    "Click any timer's time to copy just that one.",
+    "Click any timer row in a historical saved session to copy its time.",
+    "Double-click a row's name to rename it in place.",
+    "Right-click a row for Set Time, colors, and more.",
+    "Shift-click Start to run a timer alongside the others.",
+    "Hold Shift when clicking time adjusts for 1 minute increments instead of 5.",
+    "Click the footer status line to copy every time at once.",
+    "Ctrl+Z undoes deletes, resets, renames and reorders.",
+    "Height can be shrunken from the maximum, and will persist (with scroll).",
+    "Unlock the UI (bottom left) to add, rearrange, and delete rows.",
+    "Past sessions live under History. Backups live under General.",
+    "Copy Format, under General, decides how times reach your clipboard.",
+    "More than 20 themes are available in Appearance to improve your visual experience.",
+    "CT2 maintains backups for unexpected interruptions. Restore them in General.",
+)
+
+# Slow on purpose. Long enough to finish reading and glance away, short
+# enough that a minute of picking a theme shows you a few.
+TIP_INTERVAL_MS = 9000
+
+# Fixed label, never part of the cycling text and never elided. Without it a
+# lone italic sentence in the corner reads as a status message about whatever
+# page you happen to be on.
+TIP_PREFIX = "Tip: "
 from ct.ui.theme import THEMES, SIZES, FONTS, build_menu_stylesheet
 from ct.ui.widgets import TickCheckBox
 from ct.util import (format_time, format_copy_time,
@@ -105,7 +148,7 @@ class ReportProblemDialog(QDialog):
         self._text.setPlaceholderText(
             "What were you doing, and what happened instead?")
         self._text.setMinimumHeight(120)
-        # Coloured explicitly: without this the editor inherits a foreground
+        # Colored explicitly: without this the editor inherits a foreground
         # that sits almost on top of its own background on most themes, and
         # the one box the user has to type into is the one they can't read.
         t = THEMES.get(theme, THEMES["E-Ink (Default)"])
@@ -160,7 +203,6 @@ class ConfigDialog(QDialog):
         self.chosen_show_group_count = cfg.get("show_group_count", True)
         self.chosen_show_group_time = cfg.get("show_group_time", True)
         self.chosen_always_on_top = cfg.get("always_on_top", True)
-        self.chosen_snapshot_min_minutes = cfg.get("snapshot_min_minutes", 5)
         self.chosen_confirm_delete = cfg.get("confirm_delete", True)
         self.chosen_confirm_reset = cfg.get("confirm_reset", True)
         self.chosen_daily_reset_enabled = cfg.get("daily_reset_enabled", True)
@@ -190,7 +232,7 @@ class ConfigDialog(QDialog):
         # so these two lists must stay in lockstep.
         self._tab_list.addItem("About")
         self._tab_list.addItem("General")
-        self._tab_list.addItem("Daily Reset")
+        self._tab_list.addItem("History")
         self._tab_list.addItem("Appearance")
         # About sits at the top but is not where you land — the dialog opens
         # on the page people actually came to change. The matching stack page
@@ -214,9 +256,12 @@ class ConfigDialog(QDialog):
 
         left_col.addLayout(pages, 1)
 
-        # Bottom row: Apply
+        # Bottom row: a cycling tip on the left, Apply on the right.
         btn_row = QHBoxLayout()
-        btn_row.addStretch()
+        # Stretch factor on the label, and NO addStretch: with an Ignored
+        # width policy the label demands nothing, so a stretch item beside it
+        # takes the entire row and the strip renders zero pixels wide.
+        btn_row.addWidget(self._build_tip_strip(), 1)
         apply_btn = QPushButton("Apply")
         apply_btn.setFont(QFont("Calibri", 12))
         apply_btn.clicked.connect(self._apply)
@@ -300,6 +345,89 @@ class ConfigDialog(QDialog):
     # ------------------------------------------------------------------ #
     #  General page                                                        #
     # ------------------------------------------------------------------ #
+
+    # ------------------------------------------------------------------ #
+    #  Tip strip                                                           #
+    # ------------------------------------------------------------------ #
+
+    def _build_tip_strip(self):
+        """One quiet line, bottom-left, cycling forever while the dialog is open.
+
+        Built once and parented below the page stack rather than added to
+        each page, so a new settings page gets it for free and can never
+        forget it.
+        """
+        self._tip_lbl = QLabel()
+        self._tip_lbl.setFont(QFont("Calibri", 10))
+        self._apply_tip_color()
+        # Never wrap, never grow. Wrapping would change the strip's height as
+        # it cycles, which would jostle the whole dialog every nine seconds;
+        # Ignored width means a long line clips instead of widening the
+        # dialog. Both are belt-and-braces around the length test on TIPS.
+        self._tip_lbl.setWordWrap(False)
+        self._tip_lbl.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Fixed)
+        self._tip_lbl.setTextInteractionFlags(Qt.NoTextInteraction)
+
+        # Start somewhere random so opening settings twice does not always
+        # greet you with the same line.
+        self._tip_index = random.randrange(len(TIPS)) if TIPS else 0
+        self._show_tip()
+
+        self._tip_timer = QTimer(self)
+        self._tip_timer.setInterval(TIP_INTERVAL_MS)
+        self._tip_timer.timeout.connect(self._next_tip)
+        self._tip_timer.start()
+        return self._tip_lbl
+
+    def _apply_tip_color(self):
+        """Tint the strip with the theme's muted foreground.
+
+        app_fg_muted is the right key because this dialog's background IS
+        app_bg — build_stylesheet paints QDialog with it and the sheet is
+        set on the QApplication, so it cascades here. The pair is designed
+        to sit together.
+
+        The SAVED theme, deliberately, not the live combo. _apply_style runs
+        only after this dialog closes, so the background behind the strip
+        stays the old theme while it is open. Following the dropdown would
+        put the new theme's muted color on the old theme's background —
+        the one combination nobody designed.
+        """
+        t = THEMES.get(self.chosen_theme, THEMES["E-Ink (Default)"])
+        self._tip_lbl.setStyleSheet(
+            f"color: {t['app_fg_muted']}; font-style: italic;")
+
+    def _show_tip(self):
+        """Render the current tip, elided to whatever width the strip has.
+
+        Elided rather than trusted to fit: the dialog is resizable and the
+        user picks their own font elsewhere in the app, so no fixed length
+        is safe. Eliding degrades to "…" instead of a line chopped
+        mid-word, and the tooltip still carries the whole thing.
+
+        The "Tip: " prefix is held OUT of the elision and re-attached after,
+        so a narrow dialog eats the tip rather than the label telling you
+        what it is.
+        """
+        if not TIPS or not hasattr(self, "_tip_lbl"):
+            return
+        full = TIPS[self._tip_index % len(TIPS)]
+        fm = QFontMetrics(self._tip_lbl.font())
+        width = self._tip_lbl.width() - fm.horizontalAdvance(TIP_PREFIX)
+        text = (fm.elidedText(full, Qt.ElideRight, width)
+                if width > 0 else full)
+        self._tip_lbl.setText(TIP_PREFIX + text)
+        self._tip_lbl.setToolTip(TIP_PREFIX + full)
+
+    def _next_tip(self):
+        self._tip_index = (self._tip_index + 1) % len(TIPS)
+        self._show_tip()
+
+    def resizeEvent(self, event):
+        # Re-elide against the new width. Without this a dialog dragged
+        # wider keeps showing the ellipsis it needed when it was narrow.
+        super().resizeEvent(event)
+        self._show_tip()
 
     def _build_general_page(self, cfg, on_reset):
         page = QWidget()
@@ -414,23 +542,6 @@ class ConfigDialog(QDialog):
 
         # Backups
         self._snap_paths = []
-
-        # Backup Interval
-        row = QHBoxLayout()
-        lbl = QLabel("Backup Interval:")
-        backup_interval_tooltip = "Will try to keep a fresh backup of the current state every N minutes."
-        lbl.setFont(QFont("Calibri", 12, QFont.Bold))
-        lbl.setToolTip(backup_interval_tooltip)
-        self._snapshot_interval = QSpinBox()
-        self._snapshot_interval.setRange(1, 60)
-        self._snapshot_interval.setValue(cfg.get("snapshot_min_minutes", 5))
-        self._snapshot_interval.setSuffix(" min")
-        self._snapshot_interval.setMinimumWidth(200)
-        self._snapshot_interval.setMinimumHeight(28)
-        self._snapshot_interval.setToolTip(backup_interval_tooltip)
-        row.addWidget(lbl)
-        row.addWidget(self._snapshot_interval)
-        lay.addLayout(row)
 
         # Restore from Backup — toggle button
         btn_row = QHBoxLayout()
@@ -1453,13 +1564,13 @@ class ConfigDialog(QDialog):
             f"#pT2Row {{ background-color: {t['app_bg']};"
             f"  margin-left: 12px; }}")
 
-        # Group header label colours (preview shows running children)
+        # Group header label colors (preview shows running children)
         grp_lbl_running = (
             f"color: {ghfg_running}; background: transparent;")
         for lbl in (self._p_gname, self._p_gcount, self._p_gtime):
             lbl.setStyleSheet(grp_lbl_running)
 
-        # Timer label colours
+        # Timer label colors
         tmr_lbl = f"color: {t['app_fg']}; background: transparent;"
         for lbl in (self._p1_bullet, self._p1_name, self._p1_time,
                     self._p2_bullet, self._p2_name, self._p2_time):
@@ -1586,7 +1697,6 @@ class ConfigDialog(QDialog):
         # General
         self.chosen_always_on_top = (
             self._always_on_top.currentText() == "Always On Top")
-        self.chosen_snapshot_min_minutes = self._snapshot_interval.value()
         self.chosen_confirm_delete = (
             self._confirm_delete.currentText() == "Yes")
         self.chosen_confirm_reset = (
@@ -1625,7 +1735,6 @@ class ConfigDialog(QDialog):
             "confirm_reset":        self.chosen_confirm_reset,
             "daily_reset_enabled":  self.chosen_daily_reset_enabled,
             "daily_reset_time":     self.chosen_daily_reset_time,
-            "snapshot_min_minutes": self.chosen_snapshot_min_minutes,
             "show_adjust_buttons":  self.chosen_show_adjust_buttons,
             "recover_running_time": self.chosen_recover_running_time,
             "copy_format":          self.chosen_copy_format,

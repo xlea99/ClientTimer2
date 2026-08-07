@@ -195,7 +195,6 @@ def _minimal_state(**overrides):
             "confirm_reset": True,
             "daily_reset_enabled": False,
             "daily_reset_time": "00:00",
-            "snapshot_min_minutes": 5,
             "show_adjust_buttons": True,
         },
         "session": {
@@ -384,7 +383,7 @@ class TestSettings(unittest.TestCase):
              "show_group_count": False, "show_group_time": False,
              "always_on_top": False, "confirm_delete": False,
              "confirm_reset": False, "daily_reset_enabled": True,
-             "daily_reset_time": "17:00", "snapshot_min_minutes": 10,
+             "daily_reset_time": "17:00",
              "show_adjust_buttons": False}
         s = self._cls().from_dict(d)
         self.assertEqual(s.theme, "Galaxy Dark")
@@ -392,7 +391,6 @@ class TestSettings(unittest.TestCase):
         self.assertFalse(s.client_separators)
         self.assertTrue(s.daily_reset_enabled)
         self.assertEqual(s.daily_reset_time, "17:00")
-        self.assertEqual(s.snapshot_min_minutes, 10)
         self.assertFalse(s.show_adjust_buttons)
 
     def test_from_dict_empty_uses_defaults(self):
@@ -1477,7 +1475,7 @@ class TestQtRowHover(QtWindowTestBase):
         self.win._drag.end()
         for hexv in ("#111111", "#222222", "#333333", "#444444"):
             self.assertNotIn(hexv, row_css,
-                             f"group colour {hexv} leaked onto a timer row")
+                             f"group color {hexv} leaked onto a timer row")
 
     def test_group_headers_hover_with_their_own_colour(self):
         """A bordered box reads very differently from an open row, so the
@@ -2104,6 +2102,103 @@ class TestQtSettingsDialog(QtWindowTestBase):
         self.assertEqual(dlg._p2_start.text(), "Start")
         self.assertFalse(hasattr(dlg, "_p1_stop"))
         self.assertFalse(hasattr(dlg, "_p2_stop"))
+
+    def test_the_tip_strip_has_actual_width(self):
+        """It rendered zero pixels wide once: the label has an Ignored width
+        policy, so a sibling addStretch() took the entire row and left it
+        nothing. The strip looked absent rather than broken."""
+        dlg = self.build()
+        dlg.show()
+        self.app.processEvents()
+        self.assertGreater(dlg._tip_lbl.width(), 0,
+                           "the tip strip is collapsed to nothing")
+
+    def test_the_tip_strip_shows_on_every_page(self):
+        """It lives below the page stack, not on any page, so a new settings
+        page cannot forget to include it."""
+        dlg = self.build()
+        dlg.show()
+        for i in range(dlg._stack.count()):
+            with self.subTest(page=i):
+                dlg._tab_list.setCurrentRow(i)
+                self.assertTrue(dlg._tip_lbl.isVisible())
+
+    def test_tips_cycle_through_all_of_them_and_wrap(self):
+        from ct.ui.dialogs.settings import TIPS, TIP_PREFIX
+        dlg = self.build()
+        seen = set()
+        for _ in range(len(TIPS) * 2):
+            seen.add(dlg._tip_lbl.toolTip())   # tooltip is the unelided text
+            dlg._next_tip()
+        self.assertEqual(seen, {TIP_PREFIX + t for t in TIPS})
+
+    def test_the_prefix_is_permanent_and_never_elided(self):
+        """A lone italic sentence in the corner reads as a status message
+        about the page. The prefix is held out of the elision so a narrow
+        dialog eats the tip, not the label telling you what it is."""
+        from ct.ui.dialogs.settings import TIPS, TIP_PREFIX
+        dlg = self.build()
+        dlg.show()
+        for i in range(len(TIPS)):
+            with self.subTest(tip=i):
+                dlg._tip_index = i
+                dlg._show_tip()
+                self.assertTrue(dlg._tip_lbl.text().startswith(TIP_PREFIX))
+        # Even squeezed to almost nothing.
+        dlg._tip_lbl.resize(40, dlg._tip_lbl.height())
+        dlg._show_tip()
+        self.assertTrue(dlg._tip_lbl.text().startswith(TIP_PREFIX))
+
+    def test_the_strip_uses_the_themes_muted_foreground(self):
+        """The dialog's background IS app_bg — build_stylesheet paints
+        QDialog with it — so app_fg_muted is the designed pairing. It must
+        follow the SAVED theme, since _apply_style only runs after this
+        dialog closes and the background does not move until then."""
+        from ct.ui.theme import THEMES
+        for name in ("NOCturnal", "Manila Memories", "Galaxy Dark"):
+            with self.subTest(theme=name):
+                self.win._state.settings.theme = name
+                dlg = self.build()
+                self.assertIn(THEMES[name]["app_fg_muted"].lower(),
+                              dlg._tip_lbl.styleSheet().lower())
+                # Changing the dropdown must NOT move it: that would put the
+                # new theme's muted colour on the old theme's background.
+                other = "95 Windows" if name != "95 Windows" else "NOCturnal"
+                dlg._theme.setCurrentText(other)
+                dlg._refresh_preview()
+                self.assertIn(THEMES[name]["app_fg_muted"].lower(),
+                              dlg._tip_lbl.styleSheet().lower())
+
+    def test_the_strip_height_never_changes(self):
+        """A tip that wrapped would resize the strip mid-cycle and jostle the
+        whole dialog every few seconds while you were reading it."""
+        from ct.ui.dialogs.settings import TIPS
+        dlg = self.build()
+        heights = set()
+        for i in range(len(TIPS)):
+            dlg._tip_index = i
+            dlg._show_tip()
+            heights.add(dlg._tip_lbl.sizeHint().height())
+        self.assertEqual(len(heights), 1, f"strip height varies: {heights}")
+
+    def test_tips_are_single_line_and_unique(self):
+        from ct.ui.dialogs.settings import TIPS
+        self.assertTrue(TIPS, "no tips defined")
+        self.assertEqual(len(set(TIPS)), len(TIPS), "a tip is duplicated")
+        for tip in TIPS:
+            with self.subTest(tip=tip):
+                self.assertNotIn("\n", tip, "tips must be one line")
+                self.assertTrue(tip.strip(), "empty tip")
+                # Not a pixel budget — the test font is not the shipped font,
+                # so characters are the only stable unit here. Generous, and
+                # elision covers anything that still overflows.
+                self.assertLessEqual(len(tip), 75, "too long for the strip")
+
+    def test_the_tip_timer_is_running(self):
+        dlg = self.build()
+        self.assertTrue(dlg._tip_timer.isActive())
+        self.assertGreaterEqual(dlg._tip_timer.interval(), 3000,
+                                "cycling this fast is a distraction")
 
     def test_the_preview_refreshes_for_every_theme_and_size(self):
         """_refresh_preview restyles every preview widget, so a widget added
@@ -3455,24 +3550,25 @@ class TestEdgeCases(StatePathMixin, unittest.TestCase):
         self.assertIs(s.confirm_reset, True)
 
     def test_settings_coerces_numeric_string_int(self):
-        from ct.core.config import Settings
-        s = Settings.from_dict({"snapshot_min_minutes": "30"})
-        self.assertEqual(s.snapshot_min_minutes, 30)
+        """Against _coerce_setting directly: Settings currently has no int
+        field (snapshot_min_minutes was the last, and it was removed), but
+        the int branch still has to work for the next one."""
+        from ct.core.config import _coerce_setting
+        self.assertEqual(_coerce_setting("n", "30", 5), (30, True))
+        self.assertEqual(_coerce_setting("n", 7, 5), (7, False))
+        self.assertEqual(_coerce_setting("n", 2.9, 5), (2, True))
 
     def test_settings_bool_for_int_field_defaults(self):
-        # JSON `true` is not a sensible minutes value — reset to default.
-        from ct.core.config import Settings
-        s = Settings.from_dict({"snapshot_min_minutes": True})
-        self.assertEqual(s.snapshot_min_minutes, 5)
+        # JSON `true` is not a sensible number — reset to the default.
+        from ct.core.config import _coerce_setting
+        self.assertEqual(_coerce_setting("n", True, 5), (5, True))
 
     def test_settings_uninterpretable_values_default(self):
         from ct.core.config import Settings
         s = Settings.from_dict({
-            "snapshot_min_minutes": "abc",
             "confirm_delete": "maybe",
             "daily_reset_time": 300,
         })
-        self.assertEqual(s.snapshot_min_minutes, 5)
         self.assertIs(s.confirm_delete, True)
         self.assertEqual(s.daily_reset_time, "03:00")
 
