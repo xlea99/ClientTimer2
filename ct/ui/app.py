@@ -508,6 +508,44 @@ class MainWindow(QMainWindow):
         finally:
             self.setUpdatesEnabled(True)
 
+    def _scroll_anchor(self):
+        """The rowid sitting at the top of the viewport right now, or None.
+
+        Anchoring to a ROW rather than a pixel is what makes collapsing feel
+        like the list moving around you instead of you being flung somewhere.
+        A raw pixel value only stays correct while nothing ABOVE the viewport
+        changes height — collapse a group above you and the same offset lands
+        somewhere completely different.
+        """
+        if self._scroll_area is None:
+            return None
+        top = self._scroll_area.verticalScrollBar().value()
+        for rid in self._visible_rowids:
+            w = self._widgets.get(rid)
+            rc = w.get("container") if w else None
+            if rc is not None and rc.y() >= top - 1:
+                return rid
+        return None
+
+    def _restore_scroll_anchor(self, rid, fallback):
+        """Put `rid` back at the top of the viewport, or fall back to a value.
+
+        The fallback covers collapsing the very group you were looking at:
+        the anchor row is gone, so there is nothing to align to and the old
+        offset is the best guess left.
+        """
+        if self._scroll_area is None:
+            return
+        bar = self._scroll_area.verticalScrollBar()
+        w = self._widgets.get(rid)
+        rc = w.get("container") if w else None
+        if rc is not None and rid in self._visible_rowids:
+            # A row's own y() is by definition a flush position, so this
+            # lands on a boundary and never slices the first or last row.
+            bar.setValue(min(rc.y(), bar.maximum()))
+        else:
+            bar.setValue(min(fallback, bar.maximum()))
+
     def _restore_scroll(self, value):
         """Put the viewport back where it was before the rebuild."""
         if self._scroll_area is None:
@@ -659,49 +697,65 @@ class MainWindow(QMainWindow):
 
                 self._widgets[rid] = widget_dict
 
-                row_container.installEventFilter(self)
-                row_container.setContextMenuPolicy(Qt.CustomContextMenu)
-                row_container.customContextMenuRequested.connect(
-                    lambda pos, r=rid, w=row_container: self._on_row_context_menu(
-                        r, w.mapToGlobal(pos))
-                )
-                for child in row_container.findChildren(QPushButton):
-                    child.setContextMenuPolicy(Qt.PreventContextMenu)
-                    # A button is a child, so entering it sends Leave to the
-                    # container. Track them too or the row un-tints the moment
-                    # the pointer crosses onto Start.
-                    child.installEventFilter(self)
-                    self._row_children[child] = rid
-                for child in row_container.findChildren(QLabel):
-                    child.setAttribute(Qt.WA_TransparentForMouseEvents)
-                if self._rearranging:
-                    row_container.setCursor(Qt.OpenHandCursor)
-                    for child in row_container.findChildren(QPushButton):
-                        child.setCursor(Qt.ArrowCursor)
-                else:
-                    # These two labels undo the blanket transparent-for-mouse
-                    # above so they can be hovered and clicked in their own
-                    # right. In rearrange mode they stay transparent, so
-                    # dragging a row by its name or time still works.
-
-                    # Double-click the name to rename — rows and groups both.
-                    nlbl = widget_dict.get("name")
-                    if nlbl is not None:
-                        nlbl.setAttribute(Qt.WA_TransparentForMouseEvents, False)
-                        nlbl.installEventFilter(self)
-                        self._name_labels[nlbl] = rid
-
-                    # Click the time to copy it.
-                    if not widget_dict.get("is_group"):
-                        tlbl = widget_dict.get("time")
-                        if tlbl is not None:
-                            tlbl.setAttribute(Qt.WA_TransparentForMouseEvents, False)
-                            tlbl.installEventFilter(self)
-                            tlbl.setCursor(Qt.PointingHandCursor)
-                            self._time_labels[tlbl] = rid
-
+                self._wire_row(row_container, widget_dict, rid)
                 row_containers.append(row_container)
                 self._grid.addWidget(row_container)
+
+            # ---- Rows inside collapsed groups -------------------------
+            # Built too, then hidden. A hidden child contributes nothing to
+            # a layout, so this costs no space and no geometry — but it
+            # means _reorder_visual can always find a widget for every row.
+            #
+            # Without it, expanding a group with no widgets yet fell through
+            # to a FULL rebuild, and a rebuild only builds what is visible —
+            # so it evicted every OTHER collapsed group on the way past.
+            # Open group A, then B, then A again and all three paid ~60ms,
+            # because each one threw away the last. That is the intermittent
+            # expand spike: not "first time ever", but "first time since you
+            # last opened a different group".
+            #
+            # The trade, stated plainly: _rebuild_rows now always builds all
+            # rows, so it costs the same whatever is collapsed. Adding a
+            # client with groups collapsed is slower than it was. Switching
+            # groups — far more common — stops being slow at all.
+            built = {r["rowid"] for r, _ in visible_entries}
+            hidden_rows = [r for r in self._state.rows
+                           if r["rowid"] not in built]
+            if hidden_rows:
+                current_group_rid = None
+                group_of = {}
+                for row in self._state.rows:
+                    if row["type"] == "separator":
+                        current_group_rid = row["rowid"]
+                    else:
+                        group_of[row["rowid"]] = current_group_rid
+                for row in hidden_rows:
+                    rid = row["rowid"]
+                    if row["type"] == "separator" or rid not in self.timers:
+                        continue          # separators are never hidden
+                    rc, wd = RowFactory.timer(
+                        blueprint=blueprint, rid=rid, row=row,
+                        state=self.timers[rid],
+                        is_child=group_of.get(rid) is not None,
+                        is_dragging=False,
+                        draw_separator_line=ss.client_separators,
+                        shift_held=self._shift_held,
+                        label_align=ss.label_align,
+                        show_adjust=ss.show_adjust_buttons,
+                        show_x=self._rearranging,
+                        footer_line=False,
+                        force_line_gap=ss.client_separators,
+                        on_toggle=self._on_toggle_timer,
+                        on_adjust=self._on_adjust,
+                        on_remove=self._on_remove,
+                    )
+                    if self.timers[rid].running:
+                        self._set_bold(rid, True, wd)
+                    self._widgets[rid] = wd
+                    self._wire_row(rc, wd, rid)
+                    row_containers.append(rc)
+                    self._grid.addWidget(rc)
+                    rc.hide()
 
         # Every row gets the same height — the tallest one's. Group headers
         # and timer rows naturally differ by a few pixels, and that made any
@@ -767,6 +821,8 @@ class MainWindow(QMainWindow):
         self._status_lbl     = fw["status_lbl"]
         self._status_lbl.installEventFilter(self)
         self._cfg_btn        = fw["cfg_btn"]
+        self._footer_stack   = fw["middle"]
+        self._lock_chars     = (fw["lock_char"], fw["unlock_char"])
         # Footer sits outside the row grid so its gap above is governed by
         # the per-size "footer_gap", independent of v_spacing.
         footer.layout().setContentsMargins(
@@ -1132,8 +1188,59 @@ class MainWindow(QMainWindow):
         else:
             self._state.collapsed_groups.add(rowid)
         self._save_state()
-        self._rebuild_rows()
+        self._apply_collapse_state()
+
+    def _apply_collapse_state(self):
+        """Re-show the rows for the current collapsed set, without rebuilding.
+
+        Collapsing changes only WHICH rows are in the grid — never how any
+        of them is built. _reorder_visual already computes exactly that from
+        `collapsed_groups`, and with no drag in progress it produces the
+        resting layout, so it does the whole job at ~19ms against
+        _rebuild_rows' ~280ms.
+
+        It does not touch row CONTENT though, so the arrow glyph is ours.
+        """
+        # Captured BEFORE anything moves: _reorder_visual re-inserts every
+        # container, and a QScrollArea will happily scroll itself to keep a
+        # focused child visible — which is what flung the viewport into the
+        # middle of another group when a collapsed one below was expanded.
+        anchor = self._scroll_anchor()
+        keep = (self._scroll_area.verticalScrollBar().value()
+                if self._scroll_area is not None else 0)
+        collapsed = self._state.collapsed_groups
+        for row in self._state.rows:
+            if row["type"] != "separator":
+                continue
+            w = self._widgets.get(row["rowid"])
+            btn = w.get("group_toggle") if w else None
+            if btn is not None:
+                btn.setText("▸" if row["rowid"] in collapsed else "▾")
+        self._drag._reorder_visual()
+        self._refresh_group_headers()
+        # Rows appearing or disappearing changes the window HEIGHT, and a
+        # hidden widget's effect on a layout hint only lands once the event
+        # loop delivers the posted request — same reason the lock toggle
+        # fits twice.
         self._shrink_to_fit()
+
+        def settle():
+            self._shrink_to_fit()
+            self._grid.activate()          # y() must be current to align to
+            self._restore_scroll_anchor(anchor, keep)
+            self._update_bottom_line()
+            # Rows just moved under a stationary mouse. Qt sends Enter to
+            # whichever row is now beneath the cursor, and _on_row_hover
+            # positions the gap-fill strip from rc.y() — which is still the
+            # PRE-expand value at that moment, so the tint lands on the
+            # wrong row and its strip floats above the group header. Clear
+            # and re-derive now that the geometry is real.
+            self._clear_row_hover()
+            self._sync_hover_to_cursor()
+
+        self._grid.activate()
+        self._restore_scroll_anchor(anchor, keep)
+        QTimer.singleShot(0, settle)
 
     def _on_remove(self, rowid):
         # X deletes. It used to reset the timer instead when Shift was held,
@@ -1159,10 +1266,100 @@ class MainWindow(QMainWindow):
 
     def _on_rearrange_toggle(self):
         self._rearranging = not self._rearranging
-        self._rebuild_rows()
-        # Rearrange mode gives every row a uniform line_gap so drags never
-        # resize anything — absorb that height change here, at the toggle.
+        self._apply_rearrange_mode()
+        # The X column appears/disappears, so the rows change WIDTH. Heights
+        # do not: force_line_gap is tied to client_separators, not to the
+        # lock, so every row already reserves the gap in both modes.
+        #
+        # Fit TWICE, and the second one is the load-bearing half. Hiding a
+        # widget only POSTS a layout request; every cached hint from the X
+        # button up to the grid stays stale until the event loop delivers
+        # it, and no amount of invalidate()/activate() forces it early. The
+        # immediate call catches the widening case (where the new X buttons
+        # are already visible and measurable); only the deferred one sees
+        # the shrink, which is why re-locking kept its unlocked width.
         self._shrink_to_fit()
+        QTimer.singleShot(0, self._shrink_to_fit)
+
+    def _apply_rearrange_mode(self):
+        """Switch lock state by editing the rows in place.
+
+        This used to call _rebuild_rows — ~280ms at 68 timers, and the reason
+        the lock button felt broken on a large list. Nothing about a row's
+        STRUCTURE differs between the modes; only four things do:
+
+          * the X button is visible only while unlocked
+          * the cursor over a row is an open hand
+          * the name and time labels stop being click targets, so a drag
+            started on them moves the row instead of renaming/copying
+          * the footer shows its edit page
+
+        All four are attribute flips on widgets that already exist.
+        """
+        rearranging = self._rearranging
+        for rid, w in self._widgets.items():
+            rc = w.get("container")
+            if rc is None:
+                continue
+            x_btn = w.get("x")
+            if x_btn is not None:
+                x_btn.setVisible(rearranging)
+            if rearranging:
+                rc.setCursor(Qt.OpenHandCursor)
+                for child in rc.findChildren(QPushButton):
+                    child.setCursor(Qt.ArrowCursor)
+            else:
+                # unset, not ArrowCursor: the build path never set one here,
+                # and an explicit cursor stops inheriting from the parent.
+                rc.unsetCursor()
+                for child in rc.findChildren(QPushButton):
+                    child.unsetCursor()
+            # Transparent while unlocked so a drag begun on the name or the
+            # time still grabs the ROW. Interactive while locked, which is
+            # when double-click-to-rename and click-to-copy live.
+            for key, store in (("name", self._name_labels),
+                               ("time", self._time_labels)):
+                lbl = w.get(key)
+                if lbl is None:
+                    continue
+                if key == "time" and w.get("is_group"):
+                    continue          # group totals are never click-to-copy
+                lbl.setAttribute(Qt.WA_TransparentForMouseEvents, rearranging)
+                if rearranging:
+                    lbl.removeEventFilter(self)
+                    store.pop(lbl, None)
+                    lbl.unsetCursor()
+                else:
+                    lbl.installEventFilter(self)
+                    store[lbl] = rid
+                    if key == "time":
+                        lbl.setCursor(Qt.PointingHandCursor)
+        stack = getattr(self, "_footer_stack", None)
+        if stack is not None:
+            stack.setCurrentIndex(1 if rearranging else 0)
+        btn = getattr(self, "_rearrange_btn", None)
+        if btn is not None:
+            lock_char, unlock_char = getattr(self, "_lock_chars", ("", ""))
+            btn.setText(unlock_char if rearranging else lock_char)
+            btn.setToolTip("Lock UI layout" if rearranging
+                           else "Unlock UI layout (drag rows to rearrange)")
+        # The X column changed the rows' WIDTH, and every cached hint from
+        # the button up to the grid is now stale. Hiding a widget only POSTS
+        # a layout request, so without forcing it here _shrink_to_fit runs
+        # first and measures the still-wide grid — which is why re-locking
+        # left the window at its unlocked width.
+        #
+        # Each row's own layout first: the X lives in there, and an outer
+        # invalidate does not reach a child layout's cache. Then the grid,
+        # invalidate THEN activate — activate alone re-lays-out from the
+        # stale caches it was supposed to replace.
+        for w in self._widgets.values():
+            rc = w.get("container")
+            if rc is not None and rc.layout() is not None:
+                rc.layout().invalidate()
+        self._grid.invalidate()
+        self._grid.activate()
+        self._grid_widget.adjustSize()
 
     # ------------------------------------------------------------------ #
     #  Hover and context menu                                              #
@@ -1674,8 +1871,7 @@ class MainWindow(QMainWindow):
             else:
                 collapsed.clear()
             self._save_state()
-            self._rebuild_rows()
-            self._shrink_to_fit()
+            self._apply_collapse_state()
             return
 
         if action == rename_action:
@@ -2080,6 +2276,94 @@ class MainWindow(QMainWindow):
             self._widgets[parent]["time"].setText(
                 format_time(self._group_total_time(parent)))
 
+    def _wire_row(self, row_container, widget_dict, rid):
+        """Event filters, context menu, cursors and click targets for a row.
+
+        Extracted so the visible-row loop and the hidden-row pass share ONE
+        definition. Two copies of this would drift, and the drift would show
+        up as a row that silently stops responding to hover or double-click
+        only after being revealed from a collapsed group.
+        """
+        row_container.installEventFilter(self)
+        row_container.setContextMenuPolicy(Qt.CustomContextMenu)
+        row_container.customContextMenuRequested.connect(
+            lambda pos, r=rid, w=row_container: self._on_row_context_menu(
+                r, w.mapToGlobal(pos))
+        )
+        for child in row_container.findChildren(QPushButton):
+            child.setContextMenuPolicy(Qt.PreventContextMenu)
+            # A button is a child, so entering it sends Leave to the
+            # container. Track them too or the row un-tints the moment
+            # the pointer crosses onto Start.
+            child.installEventFilter(self)
+            self._row_children[child] = rid
+        for child in row_container.findChildren(QLabel):
+            child.setAttribute(Qt.WA_TransparentForMouseEvents)
+        if self._rearranging:
+            row_container.setCursor(Qt.OpenHandCursor)
+            for child in row_container.findChildren(QPushButton):
+                child.setCursor(Qt.ArrowCursor)
+        else:
+            # These two labels undo the blanket transparent-for-mouse
+            # above so they can be hovered and clicked in their own
+            # right. In rearrange mode they stay transparent, so
+            # dragging a row by its name or time still works.
+
+            # Double-click the name to rename — rows and groups both.
+            nlbl = widget_dict.get("name")
+            if nlbl is not None:
+                nlbl.setAttribute(Qt.WA_TransparentForMouseEvents, False)
+                nlbl.installEventFilter(self)
+                self._name_labels[nlbl] = rid
+
+            # Click the time to copy it.
+            if not widget_dict.get("is_group"):
+                tlbl = widget_dict.get("time")
+                if tlbl is not None:
+                    tlbl.setAttribute(Qt.WA_TransparentForMouseEvents, False)
+                    tlbl.installEventFilter(self)
+                    tlbl.setCursor(Qt.PointingHandCursor)
+                    self._time_labels[tlbl] = rid
+
+    def _clear_row_hover(self):
+        """Drop the hover tint from every row, and forget which was hovered.
+
+        Cheap: setProperty + unpolish/polish only where the flag is actually
+        set, which is at most one row.
+        """
+        for w in self._widgets.values():
+            rc = w.get("container")
+            if rc is None or not rc.property("hov"):
+                continue
+            rc.setProperty("hov", "")
+            rc.style().unpolish(rc)
+            rc.style().polish(rc)
+        self._hovered_rid = None
+
+    def _refresh_group_headers(self):
+        """Re-derive every group header's count, total and running state.
+
+        Needed because the drag path no longer full-rebuilds: a drop can move
+        a timer between groups, which changes both headers' `(N)` and total.
+        _reorder_visual only restyles and re-orders — it never touches row
+        CONTENT. _tick would fix it within a second, but a visibly stale
+        count right after a drop reads as the drag having gone wrong.
+        """
+        ss = self._state.settings
+        for row in self._state.rows:
+            if row["type"] != "separator":
+                continue
+            rid = row["rowid"]
+            w = self._widgets.get(rid)
+            if not w:
+                continue
+            children = self._group_children(rid)
+            if ss.show_group_count:
+                w["count"].setText(f"({len(children)})")
+            if ss.show_group_time:
+                w["time"].setText(format_time(self._group_total_time(rid)))
+            self._update_group_bold(rid)
+
     def _update_all_displays(self):
         for rid in self.timers:
             self._update_display(rid)
@@ -2223,7 +2507,12 @@ class MainWindow(QMainWindow):
         out = []
         for i in range(self._grid.count()):
             w = self._grid.itemAt(i).widget()
-            if w is not None:
+            # Hidden rows LIVE IN THE GRID now (rows inside collapsed groups
+            # are built and hidden so expanding never needs a rebuild). They
+            # occupy no space, so counting them made the window believe the
+            # whole list was on screen — it pinned itself to the user's
+            # height ceiling with three collapsed headers in it.
+            if w is not None and not w.isHidden():
                 # Rows carry a fixed height (the uniform-height pass), which
                 # sizeHint() alone doesn't reflect.
                 out.append(max(w.sizeHint().height(), w.minimumHeight()))
@@ -2241,7 +2530,10 @@ class MainWindow(QMainWindow):
         offsets = []
         for i in range(self._grid.count()):
             w = self._grid.itemAt(i).widget()
-            if w is not None:
+            # Skip hidden rows: they are never laid out, so y() is 0 for all
+            # of them, and a list of phantom zeroes makes every scroll step
+            # snap to the top of the list.
+            if w is not None and not w.isHidden():
                 offsets.append(w.y())
         return offsets
 
@@ -2341,7 +2633,10 @@ class MainWindow(QMainWindow):
         target, best = None, None
         for i in range(self._grid.count()):
             w = self._grid.itemAt(i).widget()
-            if w is None:
+            # Hidden rows sit at y=0 with a real height, so they look like a
+            # near-perfect match for the top of the viewport and steal the
+            # line from the row that should carry it.
+            if w is None or w.isHidden():
                 continue
             delta = vp_bottom - (w.y() + w.height())
             if 0 <= delta <= tol and (best is None or delta < best):
@@ -2400,6 +2695,21 @@ class MainWindow(QMainWindow):
         # The central widget's hint covers grid + footer + margins — the
         # footer no longer lives inside the grid, so measure the whole thing.
         cw = self.centralWidget()
+        # QScrollArea's sizeHint is capped by Qt, so it under-reports a long
+        # list in BOTH dimensions. Height is corrected below by subtracting
+        # the scroll area's hint out of the central hint to get the chrome —
+        # valid there, because the scroll area is what drives that dimension.
+        # Width cannot use the same trick: the unlocked footer is WIDER than
+        # the scroll area's capped hint, so the subtraction returned the
+        # footer's excess as "chrome" and then added it on top of the grid,
+        # inflating the window by exactly that excess (a dead strip right of
+        # the X buttons, unlocked only). Instead, hand the scroll area its
+        # real minimum and let the layout combine it with the footer the way
+        # it already knows how — no hand-derived chrome at all.
+        if self._scroll_area is not None and self._grid_widget is not None:
+            self._scroll_area.setMinimumWidth(
+                self._grid_widget.sizeHint().width()
+                + 2 * self._scroll_area.frameWidth())
         # invalidate() as well as activate(): a child whose size constraints
         # changed this turn (the scroll viewport) leaves a stale cached hint.
         cw.layout().invalidate()
@@ -2431,16 +2741,6 @@ class MainWindow(QMainWindow):
             # and kept for _maximize_height, so it never re-derives its own.
             chrome = (hint.height() - self._scroll_area.sizeHint().height()
                       + extra_h)
-            # The same cap applies HORIZONTALLY, and used to be masked: the
-            # footer stack reported the width of its widest page, including
-            # the hidden edit controls, which happened to exceed the grid at
-            # every size. Once the footer started reporting only the visible
-            # page, nothing was left to cover the under-report and the window
-            # came out narrower than its own rows. Measure the real grid.
-            w_chrome = (hint.width() - self._scroll_area.sizeHint().width()
-                        + extra_w)
-            want_w = max(want_w,
-                         self._grid_widget.sizeHint().width() + w_chrome)
             # A toast is additive: the window grows downward to carry it
             # rather than the rows giving up space for it. So the ceiling
             # governs everything EXCEPT the toast, and the toast's height is

@@ -173,7 +173,14 @@ class DragController:
         h.setFixedSize(h.size())
         QApplication.setOverrideCursor(Qt.ClosedHandCursor)
         QApplication.instance().installEventFilter(h)
-        h._rebuild_rows()
+        # _reorder_visual, not _rebuild_rows. Everything entering a drag
+        # changes — the drag colour, the dropped separator, children hidden
+        # under a dragged group — is what this method already does, and it
+        # costs ~19ms against the rebuild's ~280ms at 68 timers. That was
+        # most of the half-second stall before a row became draggable.
+        # It falls back to a full rebuild by itself if any row lacks a
+        # widget, so the safety net is already there.
+        self._reorder_visual()
         self.last_row = h._visible_rowids.index(rowid)
         self._lift()
 
@@ -225,8 +232,23 @@ class DragController:
         QApplication.instance().removeEventFilter(h)
         h.setMinimumSize(0, 0)
         h.setMaximumSize(16777215, 16777215)
-        h._rebuild_rows()
+        # Same swap as in start(). Every drag field was cleared above, so
+        # this renders the resting appearance.
+        self._reorder_visual()
+        # ...but _reorder_visual never touches row CONTENT, and a drop can
+        # move a timer between groups. Refresh the headers or their counts
+        # and totals stay stale until the next tick.
+        h._refresh_group_headers()
+        # Clear any stale hover tint. `hov` is a PROPERTY on the container,
+        # and _on_row_hover refuses to touch it while a drag owns the strip —
+        # so whichever row was hovered when the drag STARTED still carries
+        # it. The old full rebuild built fresh containers and wiped it for
+        # free; reusing them means the row you dragged away from stays lit
+        # after the drop until something else happens to clear it.
+        h._clear_row_hover()
         h._shrink_to_fit()
+        # Re-derive from where the cursor actually is now.
+        h._sync_hover_to_cursor()
 
     def handle_event(self, obj, event):
         """Handle a QEvent during an active drag. Returns True if consumed."""
@@ -478,13 +500,27 @@ class DragController:
             if is_sep:
                 group_line = (t["group_drag_line"]
                               if self.dragging_rid == rid else t["group_line"])
-                container.setStyleSheet(
-                    f"#rowBg {{ background-color: {row_bg}; {margin_css}"
-                    f" border: 2px solid {group_line}; }}" + hover_css)
+                css = (f"#rowBg {{ background-color: {row_bg}; {margin_css}"
+                       f" border: 2px solid {group_line}; }}" + hover_css)
             else:
-                container.setStyleSheet(
-                    f"#rowBg {{ background-color: {row_bg}; {margin_css} {border_css} }}"
-                    + hover_css)
+                css = (f"#rowBg {{ background-color: {row_bg}; "
+                       f"{margin_css} {border_css} }}" + hover_css)
+
+            # setStyleSheet ONLY when the string actually changed.
+            #
+            # This ran for every row on every mouse move — 76 calls a step at
+            # 68 timers, and Qt reparses and re-resolves the style each time.
+            # It was 62% of the whole reorder (39ms of 63ms). But on a normal
+            # step only the dragged row's own rule differs; everything else
+            # recomputes to the identical string it already has.
+            #
+            # Comparing strings keeps this correct by construction: anything
+            # that genuinely changes — a row crossing into a group (margin),
+            # a neighbour gaining or losing its separator (border) — produces
+            # a different string and still gets applied.
+            if h._widgets[rid].get("_css") != css:
+                container.setStyleSheet(css)
+                h._widgets[rid]["_css"] = css
 
             container.show()
             h._grid.insertWidget(insert_idx, container)

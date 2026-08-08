@@ -96,12 +96,16 @@ class RowFactory:
                       else blueprint.theme["group_line"])
         row_container = QWidget()
         row_container.setObjectName("rowBg")
-        row_container.setStyleSheet(
+        # Kept in a local and stored on the widget dict: _reorder_visual
+        # skips setStyleSheet when the string is unchanged, and without a
+        # seed here the first drag step would repay the full cost anyway.
+        sep_css = (
             f"#rowBg {{ background-color: {row_bg}; {margin_css}"
             f" border: 2px solid {group_line}; }}"
             f" #rowBg[hov=\"1\"] {{"
             f" background-color: {blueprint.theme['group_hover_bg']};"
             f" border-color: {blueprint.theme['group_hover_line']}; }}")
+        row_container.setStyleSheet(sep_css)
         row_container_layout = QHBoxLayout(row_container)
         # Per-size; was a flat 3 on all presets. Timer rows were already
         # size-driven (0, 0, 0, line_gap) — only group headers were not.
@@ -186,7 +190,11 @@ class RowFactory:
         widget_dict = {
             "name": name_lbl, "time": time_lbl,
             "count": count_lbl, "x": x_btn,
-            "container": row_container, "is_group": True,
+            "container": row_container, "is_group": True, "_css": sep_css,
+            # The collapse arrow, so the toggle can flip ▸/▾ without a
+            # rebuild. Named apart from a timer row's "toggle" (its
+            # Start/Stop button) because the two are unrelated controls.
+            "group_toggle": toggle_btn,
             "bg_left": 0,          # separators are never indented
         }
         return row_container, widget_dict
@@ -247,11 +255,12 @@ class RowFactory:
         # nosep: _update_bottom_line drops the separator on whichever row is
         # flush with the viewport bottom, so it doesn't stack with the footer
         # rule. A selector, not a stylesheet edit — see _update_bottom_line.
-        rc.setStyleSheet(
+        tmr_css = (
             f"#rowBg {{ background-color: {row_bg}; {margin_css} {border_css} }}"
             f" #rowBg[hov=\"1\"] {{"
             f" background-color: {blueprint.theme['row_hover_bg']}; }}"
             f" #rowBg[nosep=\"1\"] {{ border-bottom: none; }}")
+        rc.setStyleSheet(tmr_css)
         rc_lay = QHBoxLayout(rc)
         # Bottom margin only when a separator line is drawn there — the
         # stylesheet border paints inside the row's rect, so without this the
@@ -352,7 +361,7 @@ class RowFactory:
             "toggle": toggle_btn,
             "minus": minus_btn, "plus": plus_btn,
             "x": x_btn, "bullet": bullet,
-            "container": rc,
+            "container": rc, "_css": tmr_css,
             # margin-left insets the PAINTED background without moving the
             # widget, so the container's geometry alone doesn't describe where
             # the row's colour actually starts. The hover strip needs to know.
@@ -485,5 +494,13 @@ class RowFactory:
             "add_input": add_input,
             "status_lbl": status_lbl,
             "cfg_btn": cfg_btn,
+            # Exposed so the lock toggle can flip the page directly instead
+            # of rebuilding the whole footer to change one index.
+            "middle": middle,
+            # ...and the two glyphs, so it can swap the icon too. The button
+            # showed a padlock in BOTH states once the rebuild stopped
+            # happening: the icon was only ever chosen at construction.
+            "lock_char": lock_char,
+            "unlock_char": unlock_char,
         }
         return footer, footer_widgets

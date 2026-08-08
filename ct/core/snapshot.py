@@ -43,6 +43,8 @@ def create_snapshot(state_dict, reason, priority="normal"):
     target_path = PATHS.snapshots / f"state_{timestamp}.json"
     with open(target_path, "w", encoding="utf-8") as f:
         json.dump(snap, f, indent=2)
+    # Seed the cache from the writer: this file never needs reading back.
+    _PRIORITY_CACHE[target_path.name] = priority
     log.debug(f"Saved snapshot for reason '{reason}', priority '{priority}' to {target_path}")
     return target_path
 
@@ -59,14 +61,37 @@ def _parse_snapshot_time(filename):
         return None
 
 
+# filename -> priority. A snapshot is immutable once written, so a cached
+# answer can never go stale; only the FILE can disappear, and prune drops
+# those entries itself.
+#
+# Exists because prune_snapshots read and JSON-parsed EVERY snapshot to
+# recover one string from meta. At the 100-file cap that measured ~350ms,
+# and it ran on every snapshot creation — drag end, layout change, reset,
+# undo, app exit. It was quietly taxing most of the app, not just dragging.
+#
+# Bounded by the directory: prune evicts entries whose file is gone, and
+# MAX_SNAPSHOTS caps the directory at 100. A filename plus a short string is
+# well under a KB, so this is kilobytes, not megabytes.
+_PRIORITY_CACHE = {}
+
+
 # Reads back the priority create_snapshot recorded. Anything unreadable is
 # treated as routine, so a corrupt file can never pin itself in the keep set.
 def _snapshot_priority(path):
+    name = path.name
+    hit = _PRIORITY_CACHE.get(name)
+    if hit is not None:
+        return hit
     try:
         with open(path, "r", encoding="utf-8") as f:
-            return json.load(f).get("meta", {}).get("snapshot_priority", "normal")
+            value = json.load(f).get("meta", {}).get("snapshot_priority", "normal")
     except (OSError, ValueError):
+        # NOT cached: an unreadable file may be one that is still being
+        # written, and pinning "normal" here would outlive the reason.
         return "normal"
+    _PRIORITY_CACHE[name] = value
+    return value
 # Use time-tier retention to remove all snapshots that don't best fit any tier. The newest snapshot is always kept.
 # We then calculate which snapshot is closest to each tier in TIERS, and delete everything else.
 def prune_snapshots():
@@ -87,6 +112,13 @@ def prune_snapshots():
     # Sort by newest first
     entries.sort(key=lambda e: e[1], reverse=True)
     now = datetime.now()
+
+    # Keep the cache bounded to what is actually on disk. Anything deleted by
+    # a previous prune (or by hand) drops out here, so this can never grow
+    # past the directory — which MAX_SNAPSHOTS already caps.
+    present = {name for name, _ in entries}
+    for gone in [k for k in _PRIORITY_CACHE if k not in present]:
+        del _PRIORITY_CACHE[gone]
 
     # Priority lives inside the file, so only read the ones we have to.
     priorities = {}

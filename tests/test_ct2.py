@@ -1660,6 +1660,41 @@ class TestQtLayoutInvariants(QtWindowTestBase):
         self.settle()
         self.assertEqual((before, before), (mid, self.win.height()))
 
+    def test_width_fit_ignores_the_scroll_areas_under_reported_hint(self):
+        """Regression: a dead strip to the right of the X buttons.
+
+        `_shrink_to_fit` used to derive horizontal chrome by subtracting the
+        scroll area's hint out of the central widget's hint. QScrollArea
+        CAPS its own hint, so that subtraction folded the under-report into
+        "chrome" and then added it back on top of the grid — inflating the
+        window by exactly the under-report and stretching every row past
+        what it asked for. Measured on the real app: 41px of dead space
+        right of the X buttons, unlocked only.
+
+        The cap does not trigger under the offscreen platform (no Calibri —
+        different metrics, different branch), so a plain pixel assertion
+        here passes with the bug still in. Force the exact input instead:
+        make the scroll area under-report its width and check that nothing
+        downstream grows by that amount.
+        """
+        from PySide6.QtCore import QSize
+        self.win._on_rearrange_toggle()
+        self.settle()
+        gw, sa = self.win._grid_widget, self.win._scroll_area
+        baseline = gw.width()
+
+        real = sa.sizeHint
+        under = 40
+        sa.sizeHint = lambda: QSize(real().width() - under, real().height())
+        try:
+            self.win._shrink_to_fit()
+            self.settle()
+            drift = gw.width() - baseline
+        finally:
+            sa.sizeHint = real
+        self.assertEqual(drift, 0,
+                         f"a {under}px under-report moved the grid {drift}px")
+
     def test_x_buttons_appear_only_while_unlocked(self):
         def xs():
             return {w["x"].isVisible()
