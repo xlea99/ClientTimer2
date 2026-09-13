@@ -1,6 +1,6 @@
 # ClientTimer2
 
-A desktop time tracker for people who bill against a lot of clients and don't want a dashboard about it. One window. Rows of timers. Start, stop, group, done. No making a big fuss about it.
+A desktop time tracker for people who bill against a lot of clients and don't want a whole agentic-integrated-production-suite about it. One window, rows of timers and groups, a start button, and an array of app themes. What else could you even need?
 
 **[Download the latest installer here](../../releases/latest)**, or view all releases.
 
