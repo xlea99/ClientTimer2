@@ -494,9 +494,17 @@ class DragController:
             # half applied.
             hov_line = (f" border-color: {t['group_hover_line']};"
                         if is_sep else "")
+            # nosep strips a TIMER's thin separator so it doesn't stack on
+            # the footer rule. A group header's bottom border is part of its
+            # box, not a separator — stripping it leaves the header with
+            # three sides. RowFactory.separator has never carried this rule;
+            # this path did, so any group header that ended up bottom-most
+            # lost its bottom edge. Kept in step with RowFactory deliberately.
+            nosep_css = ("" if is_sep else
+                         " #rowBg[nosep=\"1\"] { border-bottom: none; }")
             hover_css = (f" #rowBg[hov=\"1\"] {{"
                          f" background-color: {hov_bg};{hov_line} }}"
-                         f" #rowBg[nosep=\"1\"] {{ border-bottom: none; }}")
+                         + nosep_css)
             if is_sep:
                 group_line = (t["group_drag_line"]
                               if self.dragging_rid == rid else t["group_line"])

@@ -2405,6 +2405,245 @@ class TestReorderUndo(unittest.TestCase):
         self.assertEqual(st.collapsed_groups, {2})
 
 
+class TestQtFastRowSplice(QtWindowTestBase):
+    """Adding/removing ONE row must not rebuild, and must not differ.
+
+    _rebuild_rows is ~305ms at 65 rows and was the whole lag spike on add
+    and delete. The splice skips it whenever the shared name column would
+    not move — the only part of UIBlueprint that depends on the row list.
+    """
+
+    def _photo(self):
+        """Everything a user could perceive about the row list."""
+        self.settle()
+        self.win._grid.activate()
+        rows = []
+        for rid in self.win._visible_rowids:
+            wd = self.win._widgets[rid]
+            rc = wd["container"]
+            rows.append((rid, rc.y(), rc.height(), rc.isVisible(),
+                         wd.get("_css"), rc.property("nosep") or "",
+                         wd["name"].text() if wd.get("name") else None,
+                         wd["count"].text() if wd.get("count") else None))
+        return (list(self.win._visible_rowids), rows,
+                sorted(self.win._widgets.keys()))
+
+    def _assert_matches_rebuild(self, why):
+        """The spliced UI must equal the one a full rebuild would produce."""
+        spliced = self._photo()
+        self.win._rebuild_rows()
+        self.win._shrink_to_fit()
+        self.settle()
+        # _rebuild_rows runs _update_bottom_line while the new viewport's
+        # geometry is still stale; a later resize re-runs it in the real
+        # app. Settle both sides the same way or the reference is the
+        # unsettled one and every comparison reports a phantom difference.
+        self.win._grid.activate()
+        self.win._update_bottom_line()
+        self.assertEqual(spliced, self._photo(), why)
+
+    def test_adding_a_client_does_not_rebuild(self):
+        before = self.win._widgets[11]["container"]
+        self.win._add_input.setText("Zeta")
+        self.win._on_add()
+        self.settle()
+        self.assertIs(self.win._widgets[11]["container"], before,
+                      "existing rows were rebuilt")
+        self.assertIn("Zeta", [r["name"] for r in self.win._state.rows])
+
+    def test_removing_a_client_does_not_rebuild(self):
+        before = self.win._widgets[11]["container"]
+        self.win._on_remove(12)
+        self.settle()
+        self.assertIs(self.win._widgets[11]["container"], before,
+                      "surviving rows were rebuilt")
+        self.assertNotIn(12, self.win._widgets)
+
+    def test_spliced_add_matches_a_full_rebuild(self):
+        self.win._add_input.setText("Zeta")
+        self.win._on_add()
+        self._assert_matches_rebuild("spliced add differs from a rebuild")
+
+    def test_spliced_remove_matches_a_full_rebuild(self):
+        self.win._on_remove(12)          # from the middle: rows below move up
+        self._assert_matches_rebuild("spliced remove differs from a rebuild")
+
+    def test_spliced_group_add_and_remove_match_a_full_rebuild(self):
+        self.win._add_input.setText("Zed")
+        self.win._on_add_group()
+        self._assert_matches_rebuild("spliced group add differs")
+        gid = self.win._state.rows[-1]["rowid"]
+        self.win._on_remove_group(gid)
+        self._assert_matches_rebuild("spliced group remove differs")
+
+    def test_a_longer_name_falls_back_to_a_rebuild(self):
+        """The name column is shared, so a longer name moves every row."""
+        before = self.win._widgets[11]["container"]
+        self.win._add_input.setText("W" * 60)
+        self.win._on_add()
+        self.settle()
+        self.assertIsNot(self.win._widgets[11]["container"], before,
+                         "a widened name column must force a rebuild")
+        self._assert_matches_rebuild("fallback add differs from a rebuild")
+
+    def test_removing_the_longest_name_falls_back_to_a_rebuild(self):
+        self.win._add_input.setText("W" * 60)
+        self.win._on_add()
+        self.settle()
+        rid = self.win._state.rows[-1]["rowid"]
+        before = self.win._widgets[11]["container"]
+        self.win._on_remove(rid)
+        self.settle()
+        self.assertIsNot(self.win._widgets[11]["container"], before,
+                         "a narrowed name column must force a rebuild")
+
+    def test_emptying_the_list_falls_back_to_the_empty_state(self):
+        for rid in [r["rowid"] for r in list(self.win._state.rows)]:
+            if rid == 10:
+                self.win._on_remove_group(rid)
+            else:
+                self.win._on_remove(rid)
+            self.settle()
+        self.assertEqual(self.win._state.rows, [])
+        self.assertEqual(self.win._widgets, {})
+
+    def test_a_group_header_never_loses_its_bottom_border(self):
+        """nosep strips a TIMER's thin line. A header's border is its BOX —
+        _reorder_visual used to append the rule to separators too, so any
+        header that ended up bottom-most rendered with three sides."""
+        self.win._state.collapsed_groups = {10}
+        self.win._rebuild_rows()
+        self.win._shrink_to_fit()
+        self.settle()
+        self.win._drag._reorder_visual()
+        self.settle()
+        self.assertNotIn("nosep", self.win._widgets[10]["_css"])
+
+
+class TestQtRowSpliceViewport(QtWindowTestBase):
+    """What the fast add/remove path does to the WINDOW and the VIEWPORT.
+
+    The splice tests above prove the rows come out identical to a rebuild.
+    These cover the two things a rebuild used to do for free and the splice
+    did not: keep the window a size Qt will accept, and keep the list where
+    the user was looking.
+    """
+
+    # The survivor carries the WIDEST name: deleting the widest row falls
+    # back to a full rebuild, which refreshes every cached hint and hides
+    # exactly the bug the first test is for.
+    ROWS = [{"rowid": 68, "name": "Keeper", "type": "timer", "bg": None}] + [
+        {"rowid": 100 + i, "name": f"A{i}", "type": "timer", "bg": None}
+        for i in range(12)]
+
+    def _pump(self, secs):
+        import time
+        end = time.monotonic() + secs
+        while time.monotonic() < end:
+            self.app.processEvents()
+            time.sleep(0.004)
+
+    def _ceiling_for(self, rows):
+        """A height ceiling that shows exactly `rows` whole rows."""
+        w = self.win
+        gap = w._grid.spacing()
+        return w._last_chrome + rows * w._uniform_row_h + (rows - 1) * gap
+
+    def _row_visible(self, rid):
+        w = self.win
+        rc = w._widgets[rid]["container"]
+        top = w._scroll_area.verticalScrollBar().value()
+        bot = top + w._scroll_area.viewport().height()
+        return rc.y() >= top and rc.y() + rc.height() <= bot
+
+    def test_fast_delete_never_fits_below_the_layout_minimum(self):
+        """Deleting down to one row without a rebuild left the fit asking
+        for a height Qt refused. Qt bumped the window back up, the bump was
+        read as a user drag, the settle re-fit, and the window shook at 5Hz
+        until the timer was stopped. The stored ceiling was rewritten to
+        the bumped height as collateral."""
+        w = self.win
+        w._state.window_height = 441
+        del w.show_toast                 # every delete toasts, for real
+        for rid in [r["rowid"] for r in w._state.rows if r["rowid"] != 68]:
+            w._on_remove(rid)
+            self.settle()
+        self.assertEqual([r["rowid"] for r in w._state.rows], [68])
+        self._pump(0.8)                  # long enough for two settle cycles
+        cw = w.centralWidget()
+        min_h = cw.minimumSizeHint().height() + (w.height() - cw.height())
+        self.assertGreaterEqual(w._expected_size.height(), min_h,
+                                "fit asked for a height below the layout minimum")
+        self.assertEqual(w.height(), w._expected_size.height(),
+                         "window is not at the size the fit asked for")
+        self.assertEqual(w._state.window_height, 441,
+                         "a layout bump was recorded as a user resize")
+
+    def test_delete_keeps_the_viewport_anchored(self):
+        w = self.win
+        w._state.window_height = self._ceiling_for(4)
+        w._shrink_to_fit()
+        self.settle()
+        bar = w._scroll_area.verticalScrollBar()
+        self.assertGreater(bar.maximum(), 0, "list must scroll for this test")
+        w._grid.activate()
+        bar.setValue(w._widgets[104]["container"].y())     # A4 at the top
+        self.settle()
+        self.assertEqual(w._scroll_anchor(), 104)
+        w._on_remove(109)                 # below the viewport
+        self.settle()
+        self._pump(0.3)
+        self.assertEqual(w._scroll_anchor(), 104,
+                         "deleting a row below the viewport moved the list")
+        self.assertEqual(bar.value(), w._widgets[104]["container"].y())
+        w._on_remove(100)                 # above the viewport
+        self.settle()
+        self._pump(0.3)
+        self.assertEqual(w._scroll_anchor(), 104,
+                         "deleting a row above the viewport moved the list")
+
+    def test_adding_a_client_scrolls_it_into_view(self):
+        w = self.win
+        w._state.window_height = self._ceiling_for(4)
+        w._shrink_to_fit()
+        self.settle()
+        w._scroll_area.verticalScrollBar().setValue(0)
+        self.settle()
+        w._add_input.setText("Zed")
+        w._on_add()
+        self.settle()
+        self._pump(0.3)
+        rid = w._state.rows[-1]["rowid"]
+        self.assertTrue(self._row_visible(rid), "new row is not in view")
+        w._add_input.setText("Grp")
+        w._on_add_group()
+        self.settle()
+        self._pump(0.3)
+        rid = w._state.rows[-1]["rowid"]
+        self.assertTrue(self._row_visible(rid), "new group is not in view")
+
+    def test_adding_into_a_collapsed_bottom_group_expands_it(self):
+        from ct.core.timer_state import TimerState
+        w = self.win
+        w._state.rows = [dict(r) for r in self.ROWS[:3]] + [
+            {"rowid": 10, "name": "Group", "type": "separator", "bg": None},
+            {"rowid": 11, "name": "B1", "type": "timer", "bg": None}]
+        w.timers[11] = TimerState("B1")
+        w._state.collapsed_groups = {10}
+        self.rebuild()
+        self.assertFalse(w._widgets[11]["container"].isVisible())
+        w._add_input.setText("B2")
+        w._on_add()
+        self.settle()
+        self._pump(0.3)
+        rid = w._state.rows[-1]["rowid"]
+        self.assertNotIn(10, w._state.collapsed_groups, "group stayed collapsed")
+        self.assertTrue(w._widgets[rid]["container"].isVisible())
+        self.assertTrue(w._widgets[11]["container"].isVisible())
+        self.assertEqual(w._widgets[10]["group_toggle"].text(), "▾")
+        self.assertTrue(self._row_visible(rid), "new row is not in view")
+
+
 class TestQtDeleteButton(QtWindowTestBase):
     """X deletes, full stop.
 

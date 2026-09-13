@@ -7,8 +7,8 @@ from pathlib import Path
 from datetime import datetime, timedelta
 from PySide6.QtCore import (Qt, QEvent, QTimer, QPropertyAnimation,
                             QEasingCurve, QSharedMemory, Signal)
-from PySide6.QtGui import (QColor, QCursor, QFont, QFontDatabase, QIcon,
-                           QKeySequence)
+from PySide6.QtGui import (QColor, QCursor, QFont, QFontDatabase,
+                           QFontMetrics, QIcon, QKeySequence)
 from PySide6.QtWidgets import (
     QApplication,
     QColorDialog,
@@ -79,6 +79,23 @@ _TOAST_CLOSE_W = 18
 # ---------------------------------------------------------------------------
 # Main window
 # ---------------------------------------------------------------------------
+
+class _RowViewport(QScrollArea):
+    """A QScrollArea whose minimum height is 0, not its scrollbar's length.
+
+    QAbstractScrollArea reports a minimum height equal to the vertical
+    scrollbar's preferred length (~58px) even while the bar is hidden. With
+    one or two rows that exceeds the content, so the layout held the window
+    open and left a dead band under the last row — and, worse, held it at a
+    height _shrink_to_fit never asked for (see the floor in there). The
+    content is the only thing that should decide how short this can be.
+    """
+
+    def minimumSizeHint(self):
+        hint = super().minimumSizeHint()
+        hint.setHeight(0)
+        return hint
+
 
 class MainWindow(QMainWindow):
 
@@ -166,6 +183,8 @@ class MainWindow(QMainWindow):
         self._last_chrome    = None  # non-viewport height, set by _shrink_to_fit
         self._scroll_area    = None  # the row viewport, rebuilt with the grid
         self._hidden_line    = None  # row whose separator is currently hidden
+        self._blueprint      = None  # last UIBlueprint, for the fast add path
+        self._uniform_row_h  = None  # the one height every row is fixed to
         self._hover_strip    = None  # fills the gap above the hovered row
         self._expected_size  = None  # last size we asked for ourselves
         self._programmatic_resize = False
@@ -508,6 +527,170 @@ class MainWindow(QMainWindow):
         finally:
             self.setUpdatesEnabled(True)
 
+    # ---- Adding and removing ONE row, without rebuilding the rest ------ #
+    #
+    # Adding always APPENDS and removing takes a single row out, so nothing
+    # about how the OTHER rows are built changes — with one exception. Every
+    # row shares one name-column width, derived from the longest name in the
+    # list, and that is the only field of UIBlueprint that depends on the
+    # rows at all (everything else comes from theme/size/font). So: if the
+    # name column would not move, the cached blueprint is still exactly
+    # right and one row can be spliced in against it. If it would move,
+    # fall back to the full rebuild, which is the only thing that can
+    # re-lay every row's columns.
+    #
+    # ~305ms -> ~25ms at 65 rows. The fallback fires only when you add a
+    # client whose name is longer than every existing one, or delete the
+    # single longest-named one.
+
+    def _name_col_width(self, rows):
+        """What UIBlueprint.compute would derive for `min_name_w` on `rows`.
+
+        Font metrics only — no widgets, so it costs nothing next to a
+        rebuild. Must mirror UIBlueprint.compute exactly; if that formula
+        changes, this has to change with it or the fast path will build a
+        row against stale column geometry.
+        """
+        bp = self._blueprint
+        if bp is None:
+            return None
+        if not rows:
+            return 80
+        fm = QFontMetrics(bp.bold_label_font)
+        return (max(fm.horizontalAdvance(r["name"]) for r in rows)
+                + bp.indent_px + bp.size.get("name_pad", 4))
+
+    def _can_reuse_blueprint(self):
+        """True when a single-row splice is safe for the CURRENT row list."""
+        return (self._blueprint is not None
+                and self._grid is not None
+                and self._uniform_row_h
+                # No widgets means the empty-state label is on screen, and
+                # that has to be swapped out for a real grid.
+                and self._widgets
+                and bool(self._state.rows)
+                and self._name_col_width(self._state.rows)
+                    == self._blueprint.min_name_w)
+
+    def _build_one_row(self, row):
+        """Build, wire and parent a single row against the cached blueprint.
+
+        Position, indent and separator lines are deliberately NOT settled
+        here — _reorder_visual re-derives all three for every row from the
+        current list, and it is the one definition of that logic.
+        """
+        bp  = self._blueprint
+        ss  = self._state.settings
+        rid = row["rowid"]
+
+        if row["type"] == "separator":
+            rc, wd = RowFactory.separator(
+                blueprint=bp, rid=rid, row=row,
+                children=self._group_children(rid),
+                total_time=self._group_total_time(rid),
+                is_dragging=False,
+                collapsed=rid in self._state.collapsed_groups,
+                has_running=False,
+                show_count=ss.show_group_count, show_time=ss.show_group_time,
+                show_adjust=ss.show_adjust_buttons,
+                show_x=self._rearranging,
+                on_toggle=self._on_group_toggle,
+                on_remove=self._on_remove_group,
+            )
+        else:
+            rc, wd = RowFactory.timer(
+                blueprint=bp, rid=rid, row=row, state=self.timers[rid],
+                shift_held=self._shift_held, label_align=ss.label_align,
+                show_adjust=ss.show_adjust_buttons,
+                show_x=self._rearranging,
+                is_child=self._parent_group(rid) is not None,
+                is_dragging=False,
+                draw_separator_line=ss.client_separators,
+                footer_line=False,
+                force_line_gap=ss.client_separators,
+                on_toggle=self._on_toggle_timer,
+                on_adjust=self._on_adjust,
+                on_remove=self._on_remove,
+            )
+            if self.timers[rid].running:
+                self._set_bold(rid, True, wd)
+
+        self._widgets[rid] = wd
+        self._wire_row(rc, wd, rid)
+        # Parent it NOW. _reorder_visual calls show() before insertWidget,
+        # and show() on a parentless widget creates a top-level HWND that
+        # flashes on screen — the ghost-window bug, one row at a time.
+        self._grid.addWidget(rc)
+        rc.setFixedHeight(self._uniform_row_h)
+
+    def _drop_one_row(self, rid):
+        """Destroy a single row's widgets and purge every reference to it."""
+        wd = self._widgets.pop(rid, None)
+        if wd is None:
+            return
+        rc = wd.get("container")
+        for table in (self._row_children, self._time_labels, self._name_labels):
+            for widget, owner in list(table.items()):
+                if owner == rid:
+                    del table[widget]
+        if self._hovered_rid == rid:
+            self._hovered_rid = None
+        if rc is not None:
+            # This container may be the one whose separator is suppressed.
+            # _update_bottom_line guards the restore with try/RuntimeError,
+            # but a dangling reference to a deleted row is worth clearing.
+            if self._hidden_line is rc:
+                self._hidden_line = None
+            self._grid.removeWidget(rc)
+            rc.setParent(None)
+            rc.deleteLater()
+
+    def _viewport_anchor(self):
+        """(anchor rowid, raw scroll value) to hand to _settle_row_change.
+
+        Captured BEFORE the rows are touched, for the same reason as the
+        collapse toggle: _reorder_visual re-inserts every container, and
+        the scroll range collapses for a moment while they are all out of
+        the grid. Qt clamps the position into that empty range and it stays
+        clamped when the range comes back — so a delete far below the
+        viewport still yanked the list upward by an arbitrary amount.
+        """
+        keep = (self._scroll_area.verticalScrollBar().value()
+                if self._scroll_area is not None else 0)
+        return self._scroll_anchor(), keep
+
+    def _settle_row_change(self, anchor, keep, reveal=None):
+        """Re-order, re-derive and re-fit after a single row was spliced.
+
+        _reorder_visual owns position, indent, separator lines and hidden
+        state; it also calls _update_bottom_line. Everything else here is
+        content that only this path knows changed. `reveal` is a rowid to
+        scroll into view once the geometry is real — the row just added.
+        """
+        self._drag._reorder_visual()
+        self._refresh_group_headers()
+        self._update_status()
+        self._shrink_to_fit()
+        self._grid.activate()
+        self._restore_scroll_anchor(anchor, keep)
+
+        def settle():
+            # Same two-pass fit as the lock and collapse toggles: showing or
+            # hiding a widget only POSTS the layout request, so the first fit
+            # cannot see the new content height.
+            self._shrink_to_fit()
+            self._grid.activate()
+            self._restore_scroll_anchor(anchor, keep)
+            if reveal is not None:
+                self._scroll_to_row(reveal)
+            self._update_bottom_line()
+            # Rows moved under a stationary mouse — most obviously on delete,
+            # where everything below slides up by one row.
+            self._clear_row_hover()
+            self._sync_hover_to_cursor()
+
+        QTimer.singleShot(0, settle)
+
     def _scroll_anchor(self):
         """The rowid sitting at the top of the viewport right now, or None.
 
@@ -605,6 +788,9 @@ class MainWindow(QMainWindow):
         self._grid.setSpacing(s.get("v_spacing", s["padding"]))
 
         blueprint = UIBlueprint.compute(t, s, ss.font, self._state.rows, self._has_mdl2)
+        # Kept so a single added row can be built against the very same
+        # column geometry instead of recomputing (and rebuilding) everything.
+        self._blueprint = blueprint
 
         row_containers = []    # every row widget, for the uniform-height pass
 
@@ -766,11 +952,14 @@ class MainWindow(QMainWindow):
             uniform = max(c.sizeHint().height() for c in row_containers)
             for c in row_containers:
                 c.setFixedHeight(uniform)
+            self._uniform_row_h = uniform
+        else:
+            self._uniform_row_h = None
 
         # The grid always lives in a scroll viewport. Without one the layout's
         # minimum size is the whole row list, so the user physically cannot
         # drag the window shorter than its contents.
-        scroll = QScrollArea()
+        scroll = _RowViewport()
         scroll.setWidgetResizable(True)
         scroll.setFrameShape(QFrame.NoFrame)
         scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
@@ -1115,11 +1304,37 @@ class MainWindow(QMainWindow):
             return
         rid = self._next_rowid
         self._next_rowid += 1
-        self._state.rows.append({"rowid": rid, "name": name, "type": "timer", "bg": None})
+        row = {"rowid": rid, "name": name, "type": "timer", "bg": None}
+        self._state.rows.append(row)
         self.timers[rid] = TimerState(name)
+        # Appending under a collapsed group would file the new client away
+        # unseen — it looks like the add did nothing. Open the group so the
+        # row can be shown, like every other add.
+        parent = self._parent_group(rid)
+        if parent is not None and parent in self._state.collapsed_groups:
+            self._state.collapsed_groups.discard(parent)
+            w = self._widgets.get(parent)
+            btn = w.get("group_toggle") if w else None
+            if btn is not None:
+                btn.setText("\u25be")
         self._save_state()
         self._try_snapshot(reason="layout_change", priority="medium")
-        self._rebuild_rows()
+        self._add_row_to_ui(row)
+
+    def _add_row_to_ui(self, row):
+        """Splice one appended row in, or rebuild if the columns must move.
+
+        Either way the new row ends up in view: it was appended, and the
+        one place it certainly is not is wherever the user was looking.
+        """
+        anchor, keep = self._viewport_anchor()
+        if self._can_reuse_blueprint():
+            self._build_one_row(row)
+            self._settle_row_change(anchor, keep, reveal=row["rowid"])
+        else:
+            self._rebuild_rows()
+            self._shrink_to_fit()
+            QTimer.singleShot(0, lambda: self._scroll_to_row(row["rowid"]))
 
     def _on_add_group(self):
         raw  = self._add_input.text().strip()
@@ -1128,10 +1343,11 @@ class MainWindow(QMainWindow):
             return
         rid = self._next_rowid
         self._next_rowid += 1
-        self._state.rows.append({"rowid": rid, "name": name, "type": "separator", "bg": None})
+        row = {"rowid": rid, "name": name, "type": "separator", "bg": None}
+        self._state.rows.append(row)
         self._save_state()
         self._try_snapshot(reason="layout_change", priority="medium")
-        self._rebuild_rows()
+        self._add_row_to_ui(row)
 
     def _confirm(self, setting, title, question, disabled_msg):
         """Ask before something destructive, with a 'Don't ask again' opt-out.
@@ -1178,8 +1394,10 @@ class MainWindow(QMainWindow):
         self._state.rows = [r for r in self._state.rows if r["rowid"] != rowid]
         self._save_state()
         self._try_snapshot(reason="layout_change", priority="medium")
-        self._rebuild_rows()
-        self._shrink_to_fit()
+        # Its children become top-level (or join the group above), which
+        # changes their indent — but _reorder_visual re-derives `is_child`
+        # for every row from the list, so the splice covers that too.
+        self._remove_row_from_ui(rowid)
         self.show_toast(f"Deleted group '{name}' (Ctrl+Z to undo)", 5)
 
     def _on_group_toggle(self, rowid):
@@ -1260,9 +1478,20 @@ class MainWindow(QMainWindow):
         self._state.rows = [r for r in self._state.rows if r["rowid"] != rowid]
         self._save_state()
         self._try_snapshot(reason="layout_change", priority="medium")
-        self._rebuild_rows()
-        self._shrink_to_fit()
+        self._remove_row_from_ui(rowid)
         self.show_toast(f"Deleted '{name}' (Ctrl+Z to undo)", 5)
+
+    def _remove_row_from_ui(self, rowid):
+        """Drop one row's widgets, or rebuild if the columns must move."""
+        # Checked BEFORE dropping the widgets: the fallback needs the grid
+        # intact, and _can_reuse_blueprint reads the (already updated) rows.
+        anchor, keep = self._viewport_anchor()
+        if self._can_reuse_blueprint():
+            self._drop_one_row(rowid)
+            self._settle_row_change(anchor, keep)
+        else:
+            self._rebuild_rows()
+            self._shrink_to_fit()
 
     def _on_rearrange_toggle(self):
         self._rearranging = not self._rearranging
@@ -2674,12 +2903,13 @@ class MainWindow(QMainWindow):
         The ceiling itself keeps the user's exact number; only the window we
         draw is trimmed, so repeated rebuilds never creep the value.
         """
-        avail = target_h - chrome
-        if avail <= 0:
+        heights = self._row_heights()
+        if not heights:
             return target_h
+        avail = target_h - chrome
         spacing = self._grid.spacing()
         used = 0
-        for i, h in enumerate(self._row_heights()):
+        for i, h in enumerate(heights):
             step = h + (spacing if i else 0)
             if used + step > avail:
                 # Round to the NEAREST row rather than always trimming: if
@@ -2688,7 +2918,10 @@ class MainWindow(QMainWindow):
                     used += step
                 break
             used += step
-        return used + chrome if used > 0 else target_h
+        # A ceiling below one row would slice the only row the window
+        # shows. The ceiling keeps the user's number; the window shows a
+        # whole row anyway.
+        return max(used, heights[0]) + chrome
 
     def _shrink_to_fit(self):
         """Resize window to tightly fit its contents (allows shrinking)."""
@@ -2753,6 +2986,21 @@ class MainWindow(QMainWindow):
                 # Scrollbar is about to appear — leave room so rows don't clip.
                 want_w += self._scroll_area.verticalScrollBar().sizeHint().width()
                 want_h = self._snapped_height(ceiling, self._last_chrome) + toast_h
+        # Never ask for less than the layout's minimum. Qt re-imposes that
+        # minimum on the next layout pass regardless, and the bump arrives
+        # here as an ordinary resize event — indistinguishable from the
+        # user dragging the edge. That rewrote the ceiling to the bumped
+        # height, the settle timer re-fit to the too-small one 200ms later,
+        # and the window shook at 5Hz until something changed the layout.
+        #
+        # It got there because the numbers above are derived from size
+        # HINTS, and a QScrollArea caches its widget's hint: after the
+        # fast add/remove path splices rows without a rebuild, the cached
+        # hint still describes the old row count, so content + chrome can
+        # land below what the layout will actually accept.
+        min_hint = cw.minimumSizeHint()
+        want_w = max(want_w, min_hint.width() + extra_w)
+        want_h = max(want_h, min_hint.height() + extra_h)
         self._auto_resize(want_w, want_h)
 
     def _toast_height(self):
