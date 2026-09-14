@@ -1528,7 +1528,10 @@ class TestQtRowHover(QtWindowTestBase):
         self.win._rebuild_rows()
         sep = next(r["rowid"] for r in self.win._state.rows
                    if r["type"] == "separator")
-        self.win._drag.start(sep)
+        # Drag a TIMER: the header being dragged carries the drag colours
+        # in its hover rule instead (TestQtDragColourWins), so the header
+        # under test here must be one that is merely re-laid.
+        self.win._drag.start(12)
         self.win._drag._reorder_visual()
         css = self.win._widgets[sep]["container"].styleSheet().lower()
         self.win._drag.end()
@@ -4643,6 +4646,71 @@ class TestQtCustomColourText(QtWindowTestBase):
         w._on_start(12)
         self.assertEqual(self.colour(12), t["row_running_fg"].upper())
         w._on_stop(12)
+
+
+class TestQtDragColourWins(QtWindowTestBase):
+    """The dragged row shows row_drag_bg / group_drag_bg, not the hover
+    tint. hov="1" is set on it (the cursor is on it), and that attribute
+    rule outranks the plain rule — so it has to carry the drag colours."""
+
+    THEME = "95 Windows"          # drag and hover colours differ here
+
+    def setUp(self):
+        super().setUp()
+        self.win._state.settings.theme = self.THEME
+        self.win._apply_style()
+        self.rebuild()
+        from ct.ui.theme.colors import THEMES
+        self.t = THEMES[self.THEME]
+        self.assertNotEqual(self.t["row_drag_bg"], self.t["row_hover_bg"])
+        self.assertNotEqual(self.t["group_drag_bg"], self.t["group_hover_bg"])
+
+    @staticmethod
+    def hover_rule(css):
+        start = css.index('[hov="1"]')
+        return css[start:css.index("}", start)]
+
+    def test_dragged_timer_hover_rule_carries_the_drag_colour(self):
+        w = self.win
+        w._on_row_hover(12, True)                 # cursor is on it
+        w._drag.start(12)
+        try:
+            css = w._widgets[12]["container"].styleSheet()
+            self.assertIn(self.t["row_drag_bg"], self.hover_rule(css))
+            self.assertNotIn(self.t["row_hover_bg"], self.hover_rule(css))
+            # Neighbours keep the ordinary hover colour.
+            other = w._widgets[11]["container"].styleSheet()
+            self.assertIn(self.t["row_hover_bg"], self.hover_rule(other))
+        finally:
+            w._drag.end()
+        # And it goes back to the hover colour after the drop.
+        css = w._widgets[12]["container"].styleSheet()
+        self.assertIn(self.t["row_hover_bg"], self.hover_rule(css))
+
+    def test_dragged_header_hover_rule_carries_the_drag_colours(self):
+        w = self.win
+        w._on_row_hover(10, True)
+        w._drag.start(10)
+        try:
+            rule = self.hover_rule(w._widgets[10]["container"].styleSheet())
+            self.assertIn(self.t["group_drag_bg"], rule)
+            self.assertIn(self.t["group_drag_line"], rule)
+            self.assertNotIn(self.t["group_hover_bg"], rule)
+        finally:
+            w._drag.end()
+
+    def test_factory_build_agrees_with_the_reorder_pass(self):
+        """A mid-drag rebuild constructs the dragged row fresh; the two
+        code paths must produce the same hover rule."""
+        w = self.win
+        w._drag.start(12)
+        try:
+            reorder = self.hover_rule(w._widgets[12]["container"].styleSheet())
+            w._rebuild_rows()
+            built = self.hover_rule(w._widgets[12]["container"].styleSheet())
+        finally:
+            w._drag.end()
+        self.assertEqual(built.replace(" ", ""), reorder.replace(" ", ""))
 
 
 class TestPaths(unittest.TestCase):

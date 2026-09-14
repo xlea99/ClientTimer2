@@ -100,12 +100,22 @@ class RowFactory:
         # Kept in a local and stored on the widget dict: _reorder_visual
         # skips setStyleSheet when the string is unchanged, and without a
         # seed here the first drag step would repay the full cost anyway.
+        # The hover rule is an attribute selector, so it outranks the plain
+        # #rowBg rule — and the cursor is on the dragged row by definition,
+        # so hov="1" is set. Left at the hover colours, the row itself
+        # stayed group_hover_bg for the whole drag while its gap strip
+        # (painted from group_drag_bg directly) showed the drag colour.
+        # While dragging, the hover rule carries the drag colours too.
+        hov_bg = (blueprint.theme["group_drag_bg"] if is_dragging
+                  else blueprint.theme["group_hover_bg"])
+        hov_line = (blueprint.theme["group_drag_line"] if is_dragging
+                    else blueprint.theme["group_hover_line"])
         sep_css = (
             f"#rowBg {{ background-color: {row_bg}; {margin_css}"
             f" border: 2px solid {group_line}; }}"
             f" #rowBg[hov=\"1\"] {{"
-            f" background-color: {blueprint.theme['group_hover_bg']};"
-            f" border-color: {blueprint.theme['group_hover_line']}; }}")
+            f" background-color: {hov_bg};"
+            f" border-color: {hov_line}; }}")
         row_container.setStyleSheet(sep_css)
         row_container_layout = QHBoxLayout(row_container)
         # Per-size; was a flat 3 on all presets. Timer rows were already
@@ -259,10 +269,14 @@ class RowFactory:
         # nosep: _update_bottom_line drops the separator on whichever row is
         # flush with the viewport bottom, so it doesn't stack with the footer
         # rule. A selector, not a stylesheet edit — see _update_bottom_line.
+        # Same as the header: while dragging, hov="1" is set and its rule
+        # outranks the plain one, so it has to carry the drag colour.
+        hov_bg = (blueprint.theme["row_drag_bg"] if is_dragging
+                  else blueprint.theme["row_hover_bg"])
         tmr_css = (
             f"#rowBg {{ background-color: {row_bg}; {margin_css} {border_css} }}"
             f" #rowBg[hov=\"1\"] {{"
-            f" background-color: {blueprint.theme['row_hover_bg']}; }}"
+            f" background-color: {hov_bg}; }}"
             f" #rowBg[nosep=\"1\"] {{ border-bottom: none; }}")
         rc.setStyleSheet(tmr_css)
         rc_lay = QHBoxLayout(rc)

@@ -514,12 +514,22 @@ class DragController:
             # very differently from an open row, so the tint that works for
             # one is rarely the one that works for the other.
             is_sep = (row["type"] == "separator")
-            hov_bg = t["group_hover_bg"] if is_sep else t["row_hover_bg"]
+            dragging = (self.dragging_rid == rid)
+            # The dragged row has hov="1" (the cursor is on it), and this
+            # attribute rule outranks the plain #rowBg one — so it must
+            # carry the DRAG colours or the row never shows them, while
+            # its gap strip (painted from row_drag_bg directly) does.
+            # Kept in step with RowFactory deliberately.
+            if is_sep:
+                hov_bg = t["group_drag_bg"] if dragging else t["group_hover_bg"]
+            else:
+                hov_bg = t["row_drag_bg"] if dragging else t["row_hover_bg"]
             # A header's border is part of its fill as far as the eye is
             # concerned, so the hover rule has to move it too — otherwise the
             # box keeps its resting outline and the tint looks like it only
             # half applied.
-            hov_line = (f" border-color: {t['group_hover_line']};"
+            hov_line = ((f" border-color: "
+                         f"{t['group_drag_line'] if dragging else t['group_hover_line']};")
                         if is_sep else "")
             # nosep strips a TIMER's thin separator so it doesn't stack on
             # the footer rule. A group header's bottom border is part of its
