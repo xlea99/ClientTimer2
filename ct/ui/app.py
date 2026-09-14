@@ -39,7 +39,7 @@ from ct.core.undo import (DeleteRow, RenameRow, ReorderRows, ResetTimes,
                           UndoStack)
 from ct.ui.dialogs import ConfigDialog
 from ct.ui.drag import DragController
-from ct.ui.theme import (THEMES, SIZES, FONTS, build_stylesheet,
+from ct.ui.theme import (THEMES, SIZES, FONTS, row_fg, build_stylesheet,
                          build_menu_stylesheet)
 from ct.ui.ui_blueprint import UIBlueprint
 from ct.ui.row_factory import RowFactory
@@ -1157,7 +1157,8 @@ class MainWindow(QMainWindow):
         # QLineEdit (the inline rename editor) consumes Ctrl+Z for its own
         # undo before it ever reaches the window, which is what you want.
         if event.matches(QKeySequence.Undo):
-            self._undo_last()
+            if not self._drag.active:     # an undo rebuilds; not mid-drag
+                self._undo_last()
             return
         if event.key() == Qt.Key_Shift and not event.isAutoRepeat():
             self._shift_held = True
@@ -2540,7 +2541,9 @@ class MainWindow(QMainWindow):
         t         = THEMES.get(self._state.settings.theme, THEMES["E-Ink (Default)"])
         normal_fg = t["app_fg"]
         running_fg = t["row_running_fg"]
-        color     = running_fg if bold else normal_fg
+        row = next((r for r in self._state.rows if r["rowid"] == rowid), None)
+        color = row_fg(running_fg if bold else normal_fg,
+                       row.get("bg") if row else None)
 
         for key in ("name", "time"):
             lbl = w[key]
@@ -2577,7 +2580,9 @@ class MainWindow(QMainWindow):
         t          = THEMES.get(self._state.settings.theme, THEMES["E-Ink (Default)"])
         normal_fg  = t["group_fg"]
         running_fg = t["group_running_fg"]
-        color      = running_fg if has_running else normal_fg
+        row = next((r for r in self._state.rows if r["rowid"] == group_rowid), None)
+        color = row_fg(running_fg if has_running else normal_fg,
+                       row.get("bg") if row else None)
 
         w = self._widgets[group_rowid]
         for key in ("name", "time"):
@@ -3500,6 +3505,11 @@ class MainWindow(QMainWindow):
         return boundary_today - timedelta(days=1)
 
     def _check_daily_reset_boundary(self):
+        # A reset rebuilds every row. Mid-drag that zeroes the list under
+        # the user's hand; the tick asks again next second, so it fires
+        # the moment the drop lands.
+        if self._drag.active:
+            return
         boundary = self._most_recent_reset_boundary()
         if self._state.session_start < boundary:
             self._do_daily_reset(boundary)

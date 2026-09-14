@@ -4466,6 +4466,185 @@ class TestQtSettingsDialogFootguns(QtWindowTestBase):
         self.assertEqual(applied, [("restore", "all"), ("settings", "Billable Hours")])
 
 
+class TestLeafValidation(StatePathMixin, unittest.TestCase):
+    """A bad VALUE inside an otherwise fine state.json is repaired and
+    reported, the way a bad SHAPE already was — never a crash at launch."""
+
+    def load(self, mutate):
+        from ct.core.config import AppState
+        state = _minimal_state()
+        state["layout"]["rows"] = [
+            {"rowid": 1, "name": "A", "type": "timer", "bg": None},
+            {"rowid": 2, "name": "B", "type": "timer", "bg": None}]
+        state["session"]["tracked_times"] = {"1": {"elapsed": 5.0}, "2": {"elapsed": 6.0}}
+        mutate(state)
+        path = Path(self._tmpdir) / "state.json"
+        path.write_text(json.dumps(state), encoding="utf-8")
+        with self.assertLogs("clienttimer2", level="WARNING") as cm:
+            loaded = AppState.load(path)
+        return loaded, "\n".join(cm.output)
+
+    def test_malformed_rows_are_dropped(self):
+        def mutate(st):
+            st["layout"]["rows"] += [
+                {"name": "no rowid", "type": "timer", "bg": None},
+                {"rowid": 3, "name": "bad type", "type": "thing", "bg": None},
+                {"rowid": 4, "name": 7, "type": "timer", "bg": None},
+                "not a dict",
+                {"rowid": 1, "name": "dup", "type": "timer", "bg": None}]
+        loaded, out = self.load(mutate)
+        self.assertEqual([r["rowid"] for r in loaded.rows], [1, 2])
+        self.assertIn("layout.rows[2]", out)
+
+    def test_bad_bg_and_collapsed_groups_are_repaired(self):
+        def mutate(st):
+            st["layout"]["rows"][0]["bg"] = ["#fff"]
+            st["layout"]["collapsed_groups"] = [1, "x", None, True]
+        loaded, out = self.load(mutate)
+        self.assertIsNone(loaded.rows[0]["bg"])
+        self.assertEqual(loaded.collapsed_groups, {1})
+
+    def test_unreadable_running_since_is_dropped_and_naive_made_aware(self):
+        def mutate(st):
+            st["session"]["tracked_times"]["1"]["running_since"] = "not-a-date"
+            st["session"]["tracked_times"]["2"]["running_since"] = "2026-08-07T10:00:00"
+        loaded, out = self.load(mutate)
+        self.assertNotIn("running_since", loaded.tracked_times["1"])
+        self.assertIn("running_since", out)
+        aware = datetime.fromisoformat(loaded.tracked_times["2"]["running_since"])
+        self.assertIsNotNone(aware.tzinfo)
+
+    def test_non_dict_tracked_entry_is_dropped(self):
+        loaded, out = self.load(lambda st: st["session"]["tracked_times"].update({"1": 42}))
+        self.assertNotIn("1", loaded.tracked_times)
+
+    def test_non_string_theme_does_not_raise(self):
+        loaded, out = self.load(lambda st: st["settings"].update({"theme": [1, 2, 3]}))
+        self.assertEqual(loaded.settings.theme, "E-Ink (Default)")
+
+
+class TestTimerStateForeignInput(unittest.TestCase):
+    def test_garbage_elapsed_becomes_zero(self):
+        from ct.core.timer_state import TimerState
+        for bad in ("garbage", None, float("nan"), [1]):
+            self.assertEqual(TimerState("x", elapsed=bad).elapsed, 0.0, repr(bad))
+
+    def test_unreadable_running_since_restores_stopped(self):
+        from ct.core.timer_state import TimerState
+        ts = TimerState("x", elapsed=3.0, running_since="nope")
+        self.assertFalse(ts.running)
+        self.assertEqual(ts.elapsed, 3.0)
+
+    def test_naive_running_since_is_made_aware(self):
+        from ct.core.timer_state import TimerState
+        ts = TimerState("x", running_since="2026-08-07T10:00:00")
+        self.assertTrue(ts.running)
+        self.assertIsNotNone(ts.started_at.tzinfo)
+        ts.stop()
+
+
+class TestQtNoRebuildMidDrag(QtWindowTestBase):
+    def test_daily_reset_waits_for_the_drop(self):
+        from datetime import timedelta
+        w = self.win
+        w._state.settings.daily_reset_enabled = True
+        w._state.session_start = w._most_recent_reset_boundary() - timedelta(days=2)
+        fired = []
+        w._do_daily_reset = lambda b: fired.append(b)
+        w._drag.dragging_rid = 11                 # a drag is live
+        w._check_daily_reset_boundary()
+        self.assertEqual(fired, [], "reset fired mid-drag")
+        w._drag.dragging_rid = None
+        w._check_daily_reset_boundary()
+        self.assertEqual(len(fired), 1, "reset did not fire after the drop")
+
+    def test_undo_is_ignored_mid_drag(self):
+        from PySide6.QtGui import QKeyEvent
+        from PySide6.QtCore import QEvent, Qt
+        w = self.win
+        calls = []
+        w._undo_last = lambda: calls.append(1)
+        ev = QKeyEvent(QEvent.KeyPress, Qt.Key_Z, Qt.ControlModifier)
+        w._drag.dragging_rid = 11
+        w.keyPressEvent(ev)
+        self.assertEqual(calls, [])
+        w._drag.dragging_rid = None
+        w.keyPressEvent(ev)
+        self.assertEqual(calls, [1])
+
+
+class TestAtomicWriteJson(TempDirMixin, unittest.TestCase):
+    def test_writes_valid_json_and_leaves_no_temp_file(self):
+        from ct.util import atomic_write_json
+        path = Path(self._tmpdir) / "x.json"
+        atomic_write_json(path, {"a": 1})
+        self.assertEqual(json.loads(path.read_text(encoding="utf-8")), {"a": 1})
+        self.assertFalse(Path(str(path) + ".tmp").exists())
+
+    def test_a_failure_mid_write_leaves_the_original_intact(self):
+        from ct.util import atomic_write_json
+        path = Path(self._tmpdir) / "x.json"
+        path.write_text('{"old": true}', encoding="utf-8")
+        with patch("ct.util.misc.json.dump", side_effect=RuntimeError("disk")):
+            with self.assertRaises(RuntimeError):
+                atomic_write_json(path, {"new": True})
+        self.assertEqual(json.loads(path.read_text(encoding="utf-8")), {"old": True})
+        self.assertFalse(Path(str(path) + ".tmp").exists())
+
+    def test_snapshots_and_sessions_use_it(self):
+        from ct.core import snapshot, config
+        import inspect
+        self.assertIn("atomic_write_json", inspect.getsource(snapshot.create_snapshot))
+        self.assertIn("atomic_write_json", inspect.getsource(config.save_completed_session))
+
+
+class TestReadableFg(unittest.TestCase):
+    def test_black_on_light_white_on_dark(self):
+        from ct.ui.theme import readable_fg, row_fg
+        self.assertEqual(readable_fg("#FFFFFF"), "#000000")
+        self.assertEqual(readable_fg("#000000"), "#FFFFFF")
+        self.assertEqual(readable_fg("#001a4d"), "#FFFFFF")     # navy
+        self.assertEqual(readable_fg("#ffe680"), "#000000")     # pale yellow
+        self.assertEqual(readable_fg("#fff"), "#000000")
+        self.assertEqual(readable_fg("junk"), "#000000")
+        self.assertEqual(row_fg("#123456", None), "#123456")
+        self.assertEqual(row_fg("#123456", "#000000"), "#FFFFFF")
+
+
+class TestQtCustomColourText(QtWindowTestBase):
+    ROWS = [
+        {"rowid": 10, "name": "Group", "type": "separator", "bg": "#fff5cc"},
+        {"rowid": 11, "name": "Alpha", "type": "timer", "bg": "#101010"},
+        {"rowid": 12, "name": "Bravo", "type": "timer", "bg": None},
+    ]
+
+    def colour(self, rid, key="name"):
+        css = self.win._widgets[rid][key].styleSheet()
+        return re.search(r"color:\s*(#[0-9a-fA-F]{6})", css).group(1).upper()
+
+    def test_build_picks_readable_text_on_custom_backgrounds(self):
+        self.assertEqual(self.colour(11), "#FFFFFF")
+        self.assertEqual(self.colour(10), "#000000")
+        self.assertEqual(self.colour(10, "count"), "#000000")
+        from ct.ui.theme.colors import THEMES
+        t = THEMES[self.win._state.settings.theme]
+        self.assertEqual(self.colour(12), t["app_fg"].upper())
+
+    def test_start_and_stop_keep_it_readable(self):
+        w = self.win
+        w._on_start(11)
+        self.assertEqual(self.colour(11), "#FFFFFF")
+        self.assertEqual(self.colour(11, "time"), "#FFFFFF")
+        self.assertEqual(self.colour(10), "#000000")        # group header, running child
+        w._on_stop(11)
+        self.assertEqual(self.colour(11), "#FFFFFF")
+        from ct.ui.theme.colors import THEMES
+        t = THEMES[w._state.settings.theme]
+        w._on_start(12)
+        self.assertEqual(self.colour(12), t["row_running_fg"].upper())
+        w._on_stop(12)
+
+
 class TestPaths(unittest.TestCase):
     """Tests for ct.common.setup.PATHS."""
 

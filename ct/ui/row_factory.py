@@ -12,6 +12,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 from ct.core.timer_state import TimerState
+from ct.ui.theme import row_fg
 from ct.ui.ui_blueprint import UIBlueprint
 from ct.util import format_time
 
@@ -129,7 +130,8 @@ class RowFactory:
         name_lbl.setFont(grp_name_font)
         name_lbl.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
         name_lbl.setFixedWidth(blueprint.min_name_w)
-        fg = blueprint.theme["group_running_fg"] if has_running else blueprint.theme["group_fg"]
+        fg = row_fg(blueprint.theme["group_running_fg"] if has_running
+                    else blueprint.theme["group_fg"], row.get("bg"))
         name_lbl.setStyleSheet(f"color: {fg};")
         row_container_layout.addWidget(name_lbl)
 
@@ -144,7 +146,8 @@ class RowFactory:
         count_lbl.setFont(blueprint.action_font)
         count_lbl.setAlignment(Qt.AlignCenter)
         count_lbl.setFixedWidth(blueprint.start_min_w)
-        count_lbl.setStyleSheet(f"color: {blueprint.theme['group_fg']};")
+        count_lbl.setStyleSheet(
+            f"color: {row_fg(blueprint.theme['group_fg'], row.get('bg'))};")
         row_container_layout.addWidget(count_lbl)
 
         # Col 3: aggregate time
@@ -223,7 +226,8 @@ class RowFactory:
                   "Right": Qt.AlignRight | Qt.AlignVCenter}
 
         # Calculate the foreground based on if the timer is running or not.
-        fg = blueprint.theme["row_running_fg"] if state.running else blueprint.theme["app_fg"]
+        fg = row_fg(blueprint.theme["row_running_fg"] if state.running
+                    else blueprint.theme["app_fg"], row.get("bg"))
 
         # Calculate what the row_bg should be based on if its being dragged and/or if there's a user-set background color
         if is_dragging:

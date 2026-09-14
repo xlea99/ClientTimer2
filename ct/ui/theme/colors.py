@@ -1,4 +1,35 @@
 # Theme color palettes for the UI.
+
+
+def readable_fg(bg_hex):
+    """Black or white, whichever reads against `bg_hex`.
+
+    Threshold is WCAG relative luminance 0.179 — the point where black and
+    white text have equal contrast against the background — rather than a
+    naive 0.5, which picks white far too early on mid tones.
+    """
+    hex_str = str(bg_hex).lstrip("#")
+    if len(hex_str) == 3:
+        hex_str = "".join(ch * 2 for ch in hex_str)
+    try:
+        r, g, b = (int(hex_str[i:i + 2], 16) / 255.0 for i in (0, 2, 4))
+    except ValueError:
+        return "#000000"
+
+    def lin(c):
+        return c / 12.92 if c <= 0.03928 else ((c + 0.055) / 1.055) ** 2.4
+
+    lum = 0.2126 * lin(r) + 0.7152 * lin(g) + 0.0722 * lin(b)
+    return "#000000" if lum > 0.179 else "#FFFFFF"
+
+
+def row_fg(theme_fg, custom_bg):
+    """The text colour a row should use: the theme's, unless the user
+    painted the row, in which case whichever of black/white reads on it.
+    The running accent gives way too — bold and the bullet still mark a
+    running row, and an accent that vanishes into a custom fill marks
+    nothing."""
+    return readable_fg(custom_bg) if custom_bg else theme_fg
 #
 # Key scheme: <family>[_<state>]_<role>, where role is one of:
 #   _bg    a fill        _fg    text/foreground        _line   a rule or border

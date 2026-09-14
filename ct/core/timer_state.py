@@ -9,15 +9,31 @@ class TimerState:
     # Simple __init__, with option to specify how long the timer has already been running
     def __init__(self, name, elapsed=0.0, running_since=None):
         self.name = name
-        self.elapsed = float(elapsed)
+        # AppState.load validates these, but a TimerState is also built
+        # from snapshot restores and tests; a bad value here must not take
+        # the whole window down with it.
+        try:
+            self.elapsed = float(elapsed)
+            if self.elapsed != self.elapsed:          # NaN
+                self.elapsed = 0.0
+        except (TypeError, ValueError, OverflowError):
+            self.elapsed = 0.0
         self.running = False
         self._mono = None
         self.started_at = None  # aware datetime, set when running
 
         # This means that the timer was running when last saved, restore and restart
         if running_since is not None:
-            self.started_at = datetime.fromisoformat(running_since)
-            self.start()
+            try:
+                started = datetime.fromisoformat(running_since)
+            except (TypeError, ValueError):
+                log.warning(f"Timer '{name}' had an unreadable running_since "
+                            f"{running_since!r}; restored stopped.")
+            else:
+                if started.tzinfo is None:
+                    started = started.astimezone()
+                self.started_at = started
+                self.start()
 
         log.debug(f"Initialized new timer '{name}', with elapsed of {elapsed} that has been running_since {running_since}")
 

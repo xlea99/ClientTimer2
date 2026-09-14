@@ -1,4 +1,28 @@
+import json
+import os
 from datetime import datetime
+
+
+def atomic_write_json(path, data):
+    """Write `data` as JSON to `path` so a crash mid-write leaves either
+    the old file or the new one, never a truncated one.
+
+    Serialises to a sibling temp file and renames it over the target;
+    os.replace is atomic on the same volume. On any failure the temp file
+    is removed and the original is untouched.
+    """
+    path = str(path)
+    tmp = path + ".tmp"
+    try:
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=2)
+        os.replace(tmp, path)
+    except BaseException:
+        try:
+            os.remove(tmp)
+        except OSError:
+            pass
+        raise
 
 
 # Simply returns the current local time as an ISO8601 string with timezone offset.

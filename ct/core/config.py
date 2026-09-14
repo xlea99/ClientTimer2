@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from ct.common.logger import log
 from ct.common.setup import PATHS
-from ct.util import now_iso
+from ct.util import now_iso, atomic_write_json
 
 
 _SCHEMA_VERSION = 1
@@ -124,7 +124,11 @@ class Settings:
     @staticmethod
     def _migrate(d: dict) -> dict:
         """Rewrite settings saved by an older version into current keys."""
-        renamed = Settings._THEME_RENAMES.get(d.get("theme"))
+        theme = d.get("theme")
+        # A non-string here (a list, say) is unhashable and .get() raises;
+        # _coerce_setting deals with the bad value a moment later.
+        renamed = (Settings._THEME_RENAMES.get(theme)
+                   if isinstance(theme, str) else None)
         old_buttons = "button_visibility" in d
         if not renamed and not old_buttons:
             return d
@@ -263,9 +267,38 @@ class AppState:
                     if not isinstance(state["layout"].get("rows"), list):
                         state["layout"]["rows"] = []
                         defaulted_values.add("layout.rows")
+                    # Each row must be usable by MainWindow.__init__, which
+                    # indexes rowid/type/name directly: a malformed one used
+                    # to crash every launch until the file was hand-edited,
+                    # while a wholly corrupt file fell back cleanly. Drop
+                    # what can't be used and say so; keep the rest.
+                    kept, seen = [], set()
+                    for i, row in enumerate(state["layout"]["rows"]):
+                        ok = (isinstance(row, dict)
+                              and isinstance(row.get("rowid"), int)
+                              and not isinstance(row.get("rowid"), bool)
+                              and row.get("type") in ("timer", "separator")
+                              and isinstance(row.get("name"), str)
+                              and row["rowid"] not in seen)
+                        if not ok:
+                            defaulted_values.add(f"layout.rows[{i}]")
+                            continue
+                        if row.get("bg") is not None and not isinstance(row["bg"], str):
+                            row["bg"] = None
+                            defaulted_values.add(f"layout.rows[{i}].bg")
+                        seen.add(row["rowid"])
+                        kept.append(row)
+                    state["layout"]["rows"] = kept
                     if not isinstance(state["layout"].get("collapsed_groups"), list):
                         state["layout"]["collapsed_groups"] = []
                         defaulted_values.add("layout.collapsed_groups")
+                    else:
+                        groups = state["layout"]["collapsed_groups"]
+                        clean = [g for g in groups
+                                 if isinstance(g, int) and not isinstance(g, bool)]
+                        if len(clean) != len(groups):
+                            state["layout"]["collapsed_groups"] = clean
+                            defaulted_values.add("layout.collapsed_groups")
                     # Absent on states written before window sizing existed.
                     wh = state["layout"].get("window_height", 0)
                     if not isinstance(wh, int) or isinstance(wh, bool) or wh < 0:
@@ -297,8 +330,12 @@ class AppState:
                     # up on display. An elapsed that isn't a finite number
                     # is zeroed here, where it can be reported, rather than
                     # crashing the row it belongs to.
-                    for key, entry in state["session"]["tracked_times"].items():
+                    tracked = state["session"]["tracked_times"]
+                    for key in list(tracked):
+                        entry = tracked[key]
                         if not isinstance(entry, dict):
+                            del tracked[key]
+                            defaulted_values.add(f"session.tracked_times.{key}")
                             continue
                         el = entry.get("elapsed", 0.0)
                         ok = (isinstance(el, (int, float))
@@ -307,6 +344,18 @@ class AppState:
                         if not ok:
                             entry["elapsed"] = 0.0
                             defaulted_values.add(f"session.tracked_times.{key}.elapsed")
+                        # running_since must parse, or the timer can't be
+                        # restarted from it; a naive stamp is read as local
+                        # so the recovery arithmetic stays aware-vs-aware.
+                        rs = entry.get("running_since")
+                        if rs is not None:
+                            try:
+                                dt = datetime.fromisoformat(rs)
+                                if dt.tzinfo is None:
+                                    entry["running_since"] = dt.astimezone().isoformat()
+                            except (ValueError, TypeError):
+                                del entry["running_since"]
+                                defaulted_values.add(f"session.tracked_times.{key}.running_since")
 
                 # Log results
                 if defaulted_values:
@@ -356,12 +405,9 @@ class AppState:
     # Serialize and write state to disk. Returns the state dict.
     def save(self, timers: dict) -> dict:
         state = self._serialize(timers)
-        # Write to a temp file and atomically replace, so a crash mid-write
-        # can't corrupt state.json.
-        tmp_path = _STATE_PATH.with_suffix(".json.tmp")
-        with open(tmp_path, "w", encoding="utf-8") as f:
-            json.dump(state, f, indent=2)
-        os.replace(tmp_path, _STATE_PATH)
+        # Temp file + atomic replace, so a crash mid-write can't corrupt
+        # state.json. Same writer as snapshots and session archives.
+        atomic_write_json(_STATE_PATH, state)
         log.info(f"Saved state to '{_STATE_PATH}'.")
         return state
 
@@ -382,8 +428,7 @@ def save_completed_session(state: dict, boundary_dt: datetime) -> str:
     completed["session"]["end"] = boundary_dt.isoformat()
     ts   = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
     path = PATHS.sessions / f"session_{ts}.json"
-    with open(path, "w", encoding="utf-8") as f:
-        json.dump(completed, f, indent=2)
+    atomic_write_json(path, completed)
     log.info(f"Saved completed session to '{path}'.")
     return str(path)
 

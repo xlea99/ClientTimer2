@@ -4,6 +4,7 @@ import os
 from datetime import datetime
 from ct.common.setup import PATHS
 from ct.common.logger import log
+from ct.util import atomic_write_json
 
 # Exponential-ish time-tier targets in seconds.  For each tier we keep the snapshot whose
 # timestamp is closest to (now - tier).
@@ -41,8 +42,7 @@ def create_snapshot(state_dict, reason, priority="normal"):
 
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
     target_path = PATHS.snapshots / f"state_{timestamp}.json"
-    with open(target_path, "w", encoding="utf-8") as f:
-        json.dump(snap, f, indent=2)
+    atomic_write_json(target_path, snap)
     # Seed the cache from the writer: this file never needs reading back.
     _PRIORITY_CACHE[target_path.name] = priority
     log.debug(f"Saved snapshot for reason '{reason}', priority '{priority}' to {target_path}")
