@@ -3519,6 +3519,8 @@ class TestThemeColors(unittest.TestCase):
         "group_running_fg", "group_line", "group_hover_line", "group_drag_line",
         "chrome_line",
         "toast_bg", "toast_fg",
+        "window_header_bg", "window_header_fg", "title_hover_bg",
+        "title_close_hover_bg", "title_close_hover_fg", "use_light_icon",
     ]
 
     def test_all_themes_have_required_keys(self):
@@ -3553,6 +3555,9 @@ class TestThemeColors(unittest.TestCase):
         for name, t in THEMES.items():
             for key, val in t.items():
                 if key == "control_border_px":
+                    continue
+                if key == "use_light_icon":
+                    self.assertIsInstance(val, bool, f"Theme '{name}' use_light_icon is not a bool")
                     continue
                 self.assertTrue(
                     val.startswith("#") or val.startswith("rgb"),
@@ -4711,6 +4716,187 @@ class TestQtDragColourWins(QtWindowTestBase):
         finally:
             w._drag.end()
         self.assertEqual(built.replace(" ", ""), reorder.replace(" ", ""))
+
+
+class TestQtCustomFrame(QtWindowTestBase):
+    """The window draws its own title bar and keeps a real Win32 frame
+    without the maximize bit, so it resizes, minimizes and casts a shadow
+    like any window and never snaps."""
+
+    def setUp(self):
+        super().setUp()
+        import sys
+        if sys.platform != "win32":
+            self.skipTest("Win32 frame")
+        self.settle()
+        import ctypes
+        self.user32 = ctypes.windll.user32
+        self.hwnd = int(self.win.winId())
+
+    def rect(self):
+        from ctypes import wintypes, byref
+        r = wintypes.RECT()
+        self.user32.GetWindowRect(self.hwnd, byref(r))
+        return r
+
+    def test_style_bits(self):
+        style = self.user32.GetWindowLongW(self.hwnd, -16)
+        self.assertTrue(style & 0x00040000, "WS_THICKFRAME missing")
+        self.assertTrue(style & 0x00C00000 == 0x00C00000, "WS_CAPTION missing")
+        self.assertTrue(style & 0x00020000, "WS_MINIMIZEBOX missing")
+        self.assertFalse(style & 0x00010000, "WS_MAXIMIZEBOX present: Snap is live")
+        from PySide6.QtCore import Qt
+        self.assertTrue(self.win.windowFlags() & Qt.FramelessWindowHint)
+
+    def test_client_area_is_the_whole_window(self):
+        """WM_NCCALCSIZE answered with no non-client area."""
+        from ctypes import wintypes, byref
+        c = wintypes.RECT()
+        self.user32.GetClientRect(self.hwnd, byref(c))
+        r = self.rect()
+        self.assertEqual((c.right, c.bottom), (r.right - r.left, r.bottom - r.top))
+
+    def test_hit_test_resizes_top_and_bottom_only(self):
+        from ct.ui.app import _HTTOP, _HTBOTTOM, _HTCLIENT
+        r = self.rect()
+        cx = (r.left + r.right) // 2
+        cy = (r.top + r.bottom) // 2
+        self.assertEqual(self.win._hit_test(cx, r.top + 1), _HTTOP)
+        self.assertEqual(self.win._hit_test(cx, r.bottom - 2), _HTBOTTOM)
+        self.assertEqual(self.win._hit_test(cx, cy), _HTCLIENT)
+        self.assertEqual(self.win._hit_test(r.left + 1, cy), _HTCLIENT, "sides must not resize")
+        self.assertEqual(self.win._hit_test(r.right + 50, cy), _HTCLIENT)
+
+    def test_nchittest_message_is_answered(self):
+        import ctypes
+        from ctypes import wintypes
+        from ct.ui.app import _HTBOTTOM
+        r = self.rect()
+        x, y = (r.left + r.right) // 2, r.bottom - 2
+        msg = wintypes.MSG()
+        msg.hWnd = self.hwnd
+        msg.message = 0x0084
+        msg.lParam = (y & 0xFFFF) << 16 | (x & 0xFFFF)
+        handled, code = self.win.nativeEvent(b"windows_generic_MSG", ctypes.addressof(msg))
+        self.assertTrue(handled)
+        self.assertEqual(code, _HTBOTTOM)
+
+    def test_title_bar_sits_above_the_body_and_mirrors_the_title(self):
+        w = self.win
+        outer = w.centralWidget().layout()
+        self.assertIs(outer.itemAt(0).widget(), w._title_bar)
+        self.assertIs(w._main_lay.parentWidget(), outer.itemAt(1).widget())
+        self.assertEqual(w._title_bar._full_title, w.windowTitle())
+        # The rows and footer decide the width; the title must not.
+        self.assertLess(w._title_bar.minimumSizeHint().width(),
+                        w._content_widget.sizeHint().width())
+
+    def test_title_bar_buttons(self):
+        w = self.win
+        closed = []
+        w._title_bar.close_requested.disconnect()
+        w._title_bar.close_requested.connect(lambda: closed.append(1))
+        w._title_bar.close_requested.emit()
+        self.assertEqual(closed, [1])
+        grown = []
+        w._maximize_height = lambda: grown.append(1)
+        w._title_bar.grow_requested.disconnect()
+        w._title_bar.grow_requested.connect(w._maximize_height)
+        w._title_bar.grow_requested.emit()
+        self.assertEqual(grown, [1])
+        w._title_bar.minimize_requested.emit()
+        self.settle()
+        self.assertTrue(w.isMinimized())
+        w.showNormal()
+        self.settle()
+
+    def test_button_order_matches_windows(self):
+        lay = self.win._title_bar.layout()
+        widgets = [lay.itemAt(i).widget() for i in range(lay.count())]
+        btns = self.win._title_bar._buttons
+        order = [k for w in widgets for k, b in btns.items() if b is w]
+        self.assertEqual(order, ["minimize", "grow", "close"])
+
+    def test_window_behavior_combo_marks_the_other_option_as_a_restart(self):
+        from ct.ui.dialogs import ConfigDialog
+        w = self.win
+        for current in (True, False):
+            w._state.settings.always_on_top = current
+            dlg = ConfigDialog(w, w._state.settings.to_dict(), on_reset=w._reset_all)
+            combo = dlg._always_on_top
+            self.assertEqual(combo.currentData(), current)
+            self.assertNotIn("restart", combo.currentText())
+            other = combo.itemText(1 - combo.currentIndex())
+            self.assertIn("(requires restart)", other)
+            self.assertFalse(dlg._is_dirty())
+            combo.setCurrentIndex(1 - combo.currentIndex())
+            self.assertEqual(dlg._pending_cfg()["always_on_top"], not current)
+            self.assertTrue(dlg._is_dirty())
+
+    def test_title_bar_is_themed(self):
+        from ct.ui.theme.colors import THEMES
+        w = self.win
+        w._state.settings.theme = "95 Windows"
+        w._apply_style()
+        css = w._title_bar.styleSheet()
+        self.assertIn(THEMES["95 Windows"]["window_header_bg"], css)
+        self.assertIn(THEMES["95 Windows"]["window_header_fg"], css)
+        self.assertIn(THEMES["95 Windows"]["title_close_hover_bg"], css)
+
+    def test_title_bar_actually_paints_its_colour(self):
+        """The CSS said black; the bar painted white. A QWidget subclass
+        ignores a stylesheet background unless WA_StyledBackground is on,
+        so this reads a pixel rather than trusting the string."""
+        from PySide6.QtGui import QColor
+        w = self.win
+        w._state.settings.theme = "E-Ink (Default)"
+        w._apply_style()
+        self.settle()
+        bar = w._title_bar
+        img = bar.grab().toImage()
+        # A point in the bar's empty middle, away from icon, text and buttons.
+        x = bar.width() // 2
+        y = bar.height() - 3
+        self.assertEqual(img.pixelColor(x, y).name().upper(), "#000000")
+
+    def test_theme_picks_the_light_or_dark_icon(self):
+        """The two icons are the same alpha with opposite ink: sample the
+        darkest opaque pixel of whatever the bar is showing."""
+        from PySide6.QtGui import QColor
+        w = self.win
+        bar = w._title_bar
+
+        def ink():
+            # pixelColor, not QColor(img.pixel()): the latter drops alpha,
+            # so every transparent pixel read as opaque black.
+            img = bar._icon.pixmap().toImage()
+            vals = [img.pixelColor(x, y).lightness()
+                    for x in range(img.width()) for y in range(img.height())
+                    if img.pixelColor(x, y).alpha() > 200]
+            self.assertTrue(vals, "icon pixmap has no opaque pixels")
+            return sum(vals) / len(vals)
+
+        w._state.settings.theme = "E-Ink (Default)"       # black header, light icon
+        w._apply_style()
+        self.assertGreater(ink(), 200, "dark header should show the white icon")
+        w._state.settings.theme = "Your Call Is Important to Us"   # light header
+        w._apply_style()
+        self.assertLess(ink(), 60, "light header should show the black icon")
+
+    def test_light_icon_ships(self):
+        from ct.common.setup import PATHS
+        self.assertTrue((PATHS.assets / "icon_light.ico").exists())
+
+    def test_fit_still_lands_on_the_content(self):
+        """The bar is chrome like any other: one row plus chrome, no dead
+        band, no fight with the layout minimum."""
+        w = self.win
+        w._state.window_height = 441
+        self.rebuild()
+        cw = w.centralWidget()
+        self.assertEqual(w.height(), cw.sizeHint().height())
+        self.assertGreaterEqual(w.height(), cw.minimumSizeHint().height())
+        self.assertGreater(w._last_chrome, w._title_bar.height())
 
 
 class TestPaths(unittest.TestCase):

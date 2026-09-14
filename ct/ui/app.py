@@ -43,6 +43,7 @@ from ct.ui.theme import (THEMES, SIZES, FONTS, row_fg, build_stylesheet,
                          build_menu_stylesheet)
 from ct.ui.ui_blueprint import UIBlueprint
 from ct.ui.row_factory import RowFactory
+from ct.ui.title_bar import TitleBar
 from ct.ui.widgets import TickCheckBox
 from ct.util import format_time, format_copy_time, now_iso
 
@@ -68,6 +69,19 @@ _WM_EXITSIZEMOVE  = 0x0232
 _WM_SYSCOMMAND = 0x0112
 _SC_MAXIMIZE   = 0xF030
 _SC_MASK       = 0xFFF0
+# The custom frame: no native caption, our own hit-testing for the edges.
+_WM_NCCALCSIZE = 0x0083
+_WM_NCHITTEST  = 0x0084
+_HTCLIENT, _HTTOP, _HTBOTTOM = 1, 12, 15
+_WS_MAXIMIZEBOX, _WS_MINIMIZEBOX = 0x00010000, 0x00020000
+_WS_THICKFRAME, _WS_CAPTION = 0x00040000, 0x00C00000
+_GWL_STYLE = -16
+_RESIZE_BORDER_PX = 6           # logical; the top/bottom strip that resizes
+
+
+class _MARGINS(ctypes.Structure):
+    _fields_ = [("cxLeftWidth", ctypes.c_int), ("cxRightWidth", ctypes.c_int),
+                ("cyTopHeight", ctypes.c_int), ("cyBottomHeight", ctypes.c_int)]
 
 # Strips the client separator rule out of a row's stylesheet. Group headers
 # use a full "border:" box, not "border-bottom:", so they are left alone.
@@ -119,10 +133,14 @@ class MainWindow(QMainWindow):
         # Local, not self.: this runs before super().__init__(), and assigning
         # an attribute on a QObject before that raises.
         reset_choices = self._reset_unknown_choices(state.settings)
-        flags = Qt.Window
+        # Frameless as far as Qt is concerned: it draws no caption and
+        # believes the frame is zero-width, which matches what the window
+        # actually shows once _install_custom_frame has had its say.
+        flags = Qt.Window | Qt.FramelessWindowHint
         if state.settings.always_on_top:
             flags |= Qt.WindowStaysOnTopHint
         super().__init__(flags=flags)
+        self._install_custom_frame()
         self._state = state
         self._reset_choices = reset_choices
 
@@ -173,9 +191,25 @@ class MainWindow(QMainWindow):
         self._startup_checks()
 
         # -- Build UI skeleton --
+        # central: [title bar][body], flush. The body carries _main_lay and
+        # the frame padding, exactly as the central widget used to, so the
+        # rest of the window never learns the title bar exists — it is
+        # simply more chrome in the central widget's hint.
         central = QWidget()
         self.setCentralWidget(central)
-        self._main_lay = QVBoxLayout(central)
+        outer = QVBoxLayout(central)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.setSpacing(0)
+        self._title_bar = TitleBar(self.windowTitle(),
+                                   PATHS.assets / "icon.ico", self._has_mdl2,
+                                   light_icon_path=PATHS.assets / "icon_light.ico")
+        self._title_bar.grow_requested.connect(self._maximize_height)
+        self._title_bar.minimize_requested.connect(self.showMinimized)
+        self._title_bar.close_requested.connect(self.close)
+        outer.addWidget(self._title_bar)
+        body = QWidget()
+        outer.addWidget(body, 1)
+        self._main_lay = QVBoxLayout(body)
         self._main_lay.setContentsMargins(0, 0, 0, 0)
 
         self._time_labels    = {}    # time QLabel -> rowid, for click-to-copy
@@ -292,6 +326,70 @@ class MainWindow(QMainWindow):
         self._timer.timeout.connect(self._tick)
         self._timer.start(1000)
 
+
+    # ------------------------------------------------------------------ #
+    #  Custom frame                                                        #
+    # ------------------------------------------------------------------ #
+
+    def _install_custom_frame(self):
+        """Give the frameless window a real Win32 frame, minus the caption.
+
+        Qt made it frameless (WS_POPUP, nothing else). Put back the styles
+        that make Windows treat it as a proper window — a thick frame so
+        edge-resizing, the DWM shadow and Windows 11's rounded corners
+        work, a caption bit so the window animates and the taskbar can
+        minimize it, WS_MINIMIZEBOX for the same taskbar reason — and
+        deliberately NOT WS_MAXIMIZEBOX, which is the bit Aero Snap keys
+        off. Without it, dragging the window into a corner or against an
+        edge just puts it there.
+
+        The caption that WS_CAPTION would normally reserve is removed
+        again in nativeEvent by answering WM_NCCALCSIZE with "no non-client
+        area at all", so the client — and our own title bar — fills the
+        window. The one-pixel DWM frame extension is what keeps the
+        shadow drawn once the caption is gone.
+
+        winId() creates the native window early; Qt does not recompute
+        styles on show, so this sticks.
+        """
+        if sys.platform != "win32":
+            return
+        user32 = ctypes.windll.user32
+        hwnd = int(self.winId())
+        style = user32.GetWindowLongW(hwnd, _GWL_STYLE)
+        style |= _WS_THICKFRAME | _WS_CAPTION | _WS_MINIMIZEBOX
+        style &= ~_WS_MAXIMIZEBOX
+        user32.SetWindowLongW(hwnd, _GWL_STYLE, style)
+        try:
+            dwm = ctypes.windll.dwmapi
+            margins = _MARGINS(-1, -1, -1, -1)
+            dwm.DwmExtendFrameIntoClientArea(hwnd, ctypes.byref(margins))
+            # DWMWA_WINDOW_CORNER_PREFERENCE = 33, DWMWCP_ROUND = 2. Windows
+            # 10 has neither and returns an error, which is fine.
+            pref = ctypes.c_int(2)
+            dwm.DwmSetWindowAttribute(hwnd, 33, ctypes.byref(pref), 4)
+        except (OSError, AttributeError):
+            pass
+        # SWP_FRAMECHANGED | SWP_NOSIZE | SWP_NOMOVE | SWP_NOZORDER
+        user32.SetWindowPos(hwnd, 0, 0, 0, 0, 0, 0x0020 | 0x0001 | 0x0002 | 0x0004)
+
+    def _hit_test(self, x_phys, y_phys):
+        """Where a screen point falls on the frame, in Win32 HT* terms.
+
+        Only the top and bottom strips resize: the window's width is
+        automatic (rows and footer decide it), so a side drag would only
+        be snapped back by the next fit. Everything else is client — the
+        title bar starts its own move.
+        """
+        rect = wintypes.RECT()
+        ctypes.windll.user32.GetWindowRect(int(self.winId()), ctypes.byref(rect))
+        border = max(1, round(_RESIZE_BORDER_PX * self.devicePixelRatio()))
+        if rect.left <= x_phys < rect.right:
+            if rect.top <= y_phys < rect.top + border:
+                return _HTTOP
+            if rect.bottom - border <= y_phys < rect.bottom:
+                return _HTBOTTOM
+        return _HTCLIENT
 
     # ------------------------------------------------------------------ #
     #  Startup checks (runs before UI is built)                            #
@@ -478,6 +576,8 @@ class MainWindow(QMainWindow):
             app.setStyleSheet(style)
 
         s = SIZES.get(self._state.settings.size, SIZES["Regular"])
+        t = THEMES.get(self._state.settings.theme, THEMES["E-Ink (Default)"])
+        self._title_bar.apply_theme(t, s)
         self._main_lay.setContentsMargins(
             s["frame_pad"], s["frame_pad"], s["frame_pad"], s["frame_pad"]
         )
@@ -2747,6 +2847,19 @@ class MainWindow(QMainWindow):
                     and (msg.wParam & _SC_MASK) == _SC_MAXIMIZE):
                 self._maximize_height()
                 return True, 0        # swallow it — never actually maximize
+            elif msg.message == _WM_NCCALCSIZE:
+                # No non-client area: the client rect IS the window rect.
+                # This is what removes the caption WS_CAPTION reserved.
+                # Returning 0 for both forms of the message keeps the
+                # proposed rect untouched.
+                return True, 0
+            elif msg.message == _WM_NCHITTEST:
+                # lParam packs the screen point as two signed 16-bit ints.
+                x = ctypes.c_short(msg.lParam & 0xFFFF).value
+                y = ctypes.c_short((msg.lParam >> 16) & 0xFFFF).value
+                ht = self._hit_test(x, y)
+                if ht != _HTCLIENT:
+                    return True, ht
         return super().nativeEvent(eventType, message)
 
     def _maximize_height(self):
@@ -3045,6 +3158,7 @@ class MainWindow(QMainWindow):
                 + 2 * self._scroll_area.frameWidth())
         # invalidate() as well as activate(): a child whose size constraints
         # changed this turn (the scroll viewport) leaves a stale cached hint.
+        self._main_lay.invalidate()
         cw.layout().invalidate()
         cw.layout().activate()
         hint = cw.sizeHint()

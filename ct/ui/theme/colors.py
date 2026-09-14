@@ -1,4 +1,11 @@
 # Theme color palettes for the UI.
+#
+#   window_header_*  the window's own title bar (ct/ui/title_bar.py): the bar
+#              fill and the colour of the title text and its three buttons.
+#   use_light_icon   bool: draw the white app icon in the title bar instead
+#              of the black one (assets/icon_light.ico vs icon.ico).
+#              Their hover colours (title_*) are derived — see
+#              _derive_title_keys at the bottom.
 
 
 def readable_fg(bg_hex):
@@ -70,6 +77,9 @@ THEMES = {
         "chrome_line":       "#808080",
         "toast_bg":          "#FFFFE1",
         "toast_fg":          "#000000",
+        "window_header_bg":  "#7A737A",
+        "window_header_fg":  "#BEB7BE",
+        "use_light_icon":    True,
     },
     "A Way": {
         "app_bg":            "#292929",
@@ -96,6 +106,9 @@ THEMES = {
         "chrome_line":       "#5A4A12",
         "toast_bg":          "#FDF7D1",
         "toast_fg":          "#1A1606",
+        "window_header_bg":  "#1C1C1C",
+        "window_header_fg":  "#FDF7D1",
+        "use_light_icon":    True,
     },
     "Billable Hours": {
         "app_bg":            "#0E1A10",
@@ -122,6 +135,9 @@ THEMES = {
         "chrome_line":       "#2F5537",
         "toast_bg":          "#CFBB4A",
         "toast_fg":          "#0E1A10",
+        "window_header_bg":  "#17381D",
+        "window_header_fg":  "#F3F1D6",
+        "use_light_icon":    True,
     },
     "Burning the Midnight Oil": {
         "app_bg":            "#18110B",
@@ -153,6 +169,9 @@ THEMES = {
 
         "toast_bg":          "#D0A85F",
         "toast_fg":          "#17130F",
+        "window_header_bg":  "#281E13",
+        "window_header_fg":  "#BEA68A",
+        "use_light_icon":    True,
     },
     "Busy Signal": {
         "app_bg":            "#171311",
@@ -179,6 +198,9 @@ THEMES = {
         "chrome_line":       "#5A2A1B",
         "toast_bg":          "#F05A28",
         "toast_fg":          "#160B06",
+        "window_header_bg":  "#29211D",
+        "window_header_fg":  "#F5EEE9",
+        "use_light_icon":    True,
     },
     "Cold Transfer": {
         "app_bg":            "#0C1821",
@@ -205,6 +227,9 @@ THEMES = {
         "chrome_line":       "#2D5670",
         "toast_bg":          "#DDF7FF",
         "toast_fg":          "#07131B",
+        "window_header_bg":  "#12384E",
+        "window_header_fg":  "#DCEEF2",
+        "use_light_icon":    True,
     },
     "Copper Sunset": {
         "app_bg":            "#161F20",
@@ -236,6 +261,9 @@ THEMES = {
 
         "toast_bg":          "#C16D4E",
         "toast_fg":          "#17100C",
+        "window_header_bg":  "#274042",
+        "window_header_fg":  "#DDE8E9",
+        "use_light_icon":    True,
     },
     "Dialpad At Dusk": {
         "app_bg":            "#231735",
@@ -262,6 +290,9 @@ THEMES = {
         "chrome_line":       "#4A395E",
         "toast_bg":          "#FFC8EA",
         "toast_fg":          "#1A1028",
+        "window_header_bg":  "#1A1028",
+        "window_header_fg":  "#FFF7FB",
+        "use_light_icon":    True,
     },
     "Do Not Disturb": {
         "app_bg":            "#16141C",
@@ -288,6 +319,9 @@ THEMES = {
         "chrome_line":       "#423D4D",
         "toast_bg":          "#6D4AFF",
         "toast_fg":          "#FFFFFF",
+        "window_header_bg":  "#1F1D28",
+        "window_header_fg":  "#FFFFFF",
+        "use_light_icon":    True,
     },
     "Emergency Calls Only": {
         "app_bg":            "#0B0E11",
@@ -314,6 +348,9 @@ THEMES = {
         "chrome_line":       "#262D35",
         "toast_bg":          "#DCE3E9",
         "toast_fg":          "#0B0E11",
+        "window_header_bg":  "#0F1318",
+        "window_header_fg":  "#B9C2C9",
+        "use_light_icon":    True,
     },
     "E-Ink (Default)": {
         "app_bg":            "#FFFFFF",
@@ -340,6 +377,9 @@ THEMES = {
         "chrome_line":       "#000000",
         "toast_bg":          "#000000",
         "toast_fg":          "#FFFFFF",
+        "window_header_bg":  "#303030",
+        "window_header_fg":  "#FFFFFF",
+        "use_light_icon":    True,
     },
     "Galaxy Dark": {
         "app_bg":            "#010101",
@@ -366,6 +406,9 @@ THEMES = {
         "chrome_line":       "#2D485A",
         "toast_bg":          "#1A3A55",
         "toast_fg":          "#E1E7EC",
+        "window_header_bg":  "#151C21",
+        "window_header_fg":  "#E1E7EC",
+        "use_light_icon":    True,
     },
     "Gray Until Further Notice": {
         "app_bg":            "#D8D8D8",
@@ -392,6 +435,9 @@ THEMES = {
         "chrome_line":       "#9E9E9E",
         "toast_bg":          "#707070",
         "toast_fg":          "#FFFFFF",
+        "window_header_bg":  "#707070",
+        "window_header_fg":  "#000000",
+        "use_light_icon":    False,
     },
     "Manila Memories": {
         "app_bg":            "#E2D6C2",
@@ -418,6 +464,9 @@ THEMES = {
         "chrome_line":       "#BDAF9A",
         "toast_bg":          "#7B4F2F",
         "toast_fg":          "#FFF3DD",
+        "window_header_bg":  "#D8C8AE",
+        "window_header_fg":  "#4B382B",
+        "use_light_icon":    False,
     },
     "NOCturnal": {
         "app_bg":            "#000000",
@@ -444,6 +493,9 @@ THEMES = {
         "chrome_line":       "#1F7A1F",
         "toast_bg":          "#33DD33",
         "toast_fg":          "#000000",
+        "window_header_bg":  "#0A2A0A",
+        "window_header_fg":  "#33DD33",
+        "use_light_icon":    False,
     },
     "Out Of Office": {
         "app_bg":            "#F3EFE5",
@@ -470,6 +522,9 @@ THEMES = {
         "chrome_line":       "#D2C7B1",
         "toast_bg":          "#0E8C87",
         "toast_fg":          "#F7F1E3",
+        "window_header_bg":  "#A4CEC5",
+        "window_header_fg":  "#24443F",
+        "use_light_icon":    False,
     },
     "Park In The Forest": {
         "app_bg":            "#E9F2E6",
@@ -496,6 +551,9 @@ THEMES = {
         "chrome_line":       "#A9BFA6",
         "toast_bg":          "#2E7C35",
         "toast_fg":          "#FFFFFF",
+        "window_header_bg":  "#D2E3CD",
+        "window_header_fg":  "#24472D",
+        "use_light_icon":    False,
     },
     "Per My Last Email": {
         "app_bg":            "#000000",
@@ -522,6 +580,9 @@ THEMES = {
         "chrome_line":       "#FFE000",
         "toast_bg":          "#FFE000",
         "toast_fg":          "#000000",
+        "window_header_bg":  "#1C1C1C",
+        "window_header_fg":  "#F5F5F5",
+        "use_light_icon":    True,
     },
     "Single Pane of Glass": {
         "app_bg":            "#E8EEF2",
@@ -548,6 +609,9 @@ THEMES = {
         "chrome_line":       "#023F71",
         "toast_bg":          "#023F71",
         "toast_fg":          "#FDFDFD",
+        "window_header_bg":  "#023F71",
+        "window_header_fg":  "#FFFFFF",
+        "use_light_icon":    True,
     },
     "Telecomm Blues": {
         "app_bg":            "#052455",
@@ -574,6 +638,9 @@ THEMES = {
         "chrome_line":       "#384963",
         "toast_bg":          "#E5EAFF",
         "toast_fg":          "#191C22",
+        "window_header_bg":  "#090E22",
+        "window_header_fg":  "#FDFDFD",
+        "use_light_icon":    True,
     },
     "T-Magenta": {
         "app_bg":            "#FFFFFF",
@@ -600,6 +667,9 @@ THEMES = {
         "chrome_line":       "#CCCCCC",
         "toast_bg":          "#860043",
         "toast_fg":          "#FFFFFF",
+        "window_header_bg":  "#E8E8E8",
+        "window_header_fg":  "#262626",
+        "use_light_icon":    False,
     },
     "Your Call Is Important to Us": {
         "app_bg":            "#F3F0FA",
@@ -626,5 +696,25 @@ THEMES = {
         "chrome_line":       "#C5B8D8",
         "toast_bg":          "#7053A5",
         "toast_fg":          "#FFFFFF",
+        "window_header_bg":  "#D9CCEC",
+        "window_header_fg":  "#302A40",
+        "use_light_icon":    False,
     }
 }
+
+
+def _derive_title_keys(themes):
+    """Fill the title bar's HOVER colours for every theme that doesn't set them.
+
+    window_header_bg / window_header_fg are set per theme by hand (the
+    label and the three buttons); hover borrows the group header's, and
+    the close button's hover is Windows' own red everywhere, because that
+    is what people's hands already know.
+    """
+    for t in themes.values():
+        t.setdefault("title_hover_bg", t["group_hover_bg"])
+        t.setdefault("title_close_hover_bg", "#C42B1C")
+        t.setdefault("title_close_hover_fg", "#FFFFFF")
+
+
+_derive_title_keys(THEMES)

@@ -444,11 +444,16 @@ class ConfigDialog(QDialog):
         lbl.setFont(QFont("Calibri", 12, QFont.Bold))
         lbl.setToolTip(window_behavior_tooltip)
         self._always_on_top = QComboBox()
-        self._always_on_top.addItems(["Always On Top", "Normal Window"])
-        self._always_on_top.setCurrentText(
-            "Always On Top" if cfg.get("always_on_top", True)
-            else "Normal Window"
-        )
+        # The value rides in the item DATA; the label is free to carry a
+        # "(requires restart)" note on whichever option is NOT the one the
+        # app was started with. Read it back with currentData(), never the
+        # text.
+        current = bool(cfg.get("always_on_top", True))
+        for value, label in ((True, "Always On Top"), (False, "Normal Window")):
+            if value != current:
+                label += "  (requires restart)"
+            self._always_on_top.addItem(label, value)
+        self._always_on_top.setCurrentIndex(0 if current else 1)
         self._always_on_top.setMinimumWidth(200)
         self._always_on_top.setToolTip(window_behavior_tooltip)
         row.addWidget(lbl)
@@ -1781,7 +1786,7 @@ class ConfigDialog(QDialog):
         t = self._daily_reset_time.time()
         return {
             # General
-            "always_on_top":        self._always_on_top.currentText() == "Always On Top",
+            "always_on_top":        bool(self._always_on_top.currentData()),
             "confirm_delete":       self._confirm_delete.currentText() == "Yes",
             "confirm_reset":        self._confirm_reset.currentText() == "Yes",
             "recover_running_time": self._recover_running.currentText() == "Yes",
