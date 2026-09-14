@@ -3,6 +3,7 @@ from ctypes import wintypes
 import re
 import time
 import sys
+import unicodedata
 from pathlib import Path
 from datetime import datetime, timedelta
 from PySide6.QtCore import (Qt, QEvent, QTimer, QPropertyAnimation,
@@ -49,6 +50,8 @@ from ct.util import format_time, format_copy_time, now_iso
 # Only control characters are stripped — name labels render as PlainText so
 # nothing else needs escaping.
 _SANITIZE = re.compile(r"[\x00-\x1f\x7f-\x9f]+")
+# One cap for every way a name can be typed — see _clean_name.
+_NAME_MAX_LEN = 120
 
 # Windows sends these around an interactive move/resize of the window frame.
 # They bracket the whole gesture, so they tell us when the user has actually
@@ -105,7 +108,7 @@ class MainWindow(QMainWindow):
     # completes, logs happily, and the result silently evaporates. Signals
     # are thread-safe and queue onto the receiver's thread, which is the
     # whole point of them.
-    _update_checked = Signal(str, object)   # (status, manifest|None)
+    _update_checked = Signal(str, object, object)   # (status, manifest|None, request)
     _update_downloaded = Signal(object)     # Path, or None on failure
 
     def __init__(self):
@@ -444,7 +447,28 @@ class MainWindow(QMainWindow):
                 log.warning(f"Setting '{key}' was {bad!r}, which no longer "
                             f"exists - reset to {_SETTINGS_DEFAULTS[key]!r}.")
                 reset.append(key)
+        # Same idea for the reset time, which names a moment rather than a
+        # thing: "25:00" is a string, so it survives the type check, and
+        # datetime.replace() then raises on every tick — silently, since
+        # it happens inside a slot — taking autosave down with it.
+        if MainWindow._parse_reset_time(settings.daily_reset_time) is None:
+            bad = settings.daily_reset_time
+            settings.daily_reset_time = _SETTINGS_DEFAULTS["daily_reset_time"]
+            log.warning(f"Setting 'daily_reset_time' was {bad!r}, not a "
+                        f"time of day - reset to {settings.daily_reset_time!r}.")
+            reset.append("daily_reset_time")
         return reset
+
+    @staticmethod
+    def _parse_reset_time(text):
+        """(hour, minute) for an 'HH:MM' string, or None if it isn't one."""
+        m = re.fullmatch(r"\s*(\d{1,2}):(\d{2})\s*", str(text))
+        if not m:
+            return None
+        h, mi = int(m.group(1)), int(m.group(2))
+        if not (0 <= h <= 23 and 0 <= mi <= 59):
+            return None
+        return h, mi
 
     def _apply_style(self):
         style = build_stylesheet(self._state.settings.theme)
@@ -1007,6 +1031,9 @@ class MainWindow(QMainWindow):
         self._add_btn        = fw["add_btn"]
         self._add_group_btn  = fw["add_group_btn"]
         self._add_input      = fw["add_input"]
+        # Same cap as the rename editor, or a pasted paragraph becomes a
+        # row name and the window grows to fit it.
+        self._add_input.setMaxLength(_NAME_MAX_LEN)
         self._status_lbl     = fw["status_lbl"]
         self._status_lbl.installEventFilter(self)
         self._cfg_btn        = fw["cfg_btn"]
@@ -1049,6 +1076,20 @@ class MainWindow(QMainWindow):
     # ------------------------------------------------------------------ #
     #  Shift-key visual feedback                                           #
     # ------------------------------------------------------------------ #
+
+    def _sync_shift_from_keyboard(self):
+        """Re-read Shift after a popup: its release never reached us.
+
+        A QMenu or a modal box takes the keyboard for its lifetime, so
+        letting go of Shift while one is open leaves _shift_held stuck and
+        the -1/+1 labels lying until the window is next deactivated.
+        Behaviour was always right (the handlers ask Qt for the live
+        modifiers); only the labels needed this.
+        """
+        held = bool(QApplication.queryKeyboardModifiers() & Qt.ShiftModifier)
+        if held != self._shift_held:
+            self._shift_held = held
+            self._update_shift_labels()
 
     def _update_shift_labels(self):
         sh = self._shift_held
@@ -1297,10 +1338,40 @@ class MainWindow(QMainWindow):
         ))
         return row["name"]
 
-    def _on_add(self):
-        raw  = self._add_input.text().strip()
-        name = _SANITIZE.sub("", raw).strip()
+    def _clean_name(self, raw, kind, exclude_rowid=None):
+        """The one place a name is accepted or refused.
+
+        Returns the cleaned name, or None after toasting why not. Refused
+        outright rather than quietly fixed up:
+
+          * control characters and invisible formatting characters (zero
+            width space and friends) are stripped, and a name that is
+            nothing else is empty — it would render as a blank row
+          * a duplicate of another row of the same kind, compared without
+            case, is refused — snapshot restore matches by name when a
+            rowid is gone, and two "Acme"s make that a coin toss
+        """
+        text = _SANITIZE.sub("", raw)
+        text = "".join(ch for ch in text
+                       if unicodedata.category(ch) not in ("Cf", "Cc", "Zl", "Zp"))
+        name = text.strip()[:_NAME_MAX_LEN].strip()
+        label = "client" if kind == "timer" else "separator"
         if not name:
+            self.show_toast(f"A {label} needs a visible name", 4)
+            return None
+        for r in self._state.rows:
+            if (r["type"] == kind and r["rowid"] != exclude_rowid
+                    and r["name"].casefold() == name.casefold()):
+                self.show_toast(f"A {label} named '{r['name']}' already exists", 4)
+                return None
+        return name
+
+    def _on_add(self):
+        raw = self._add_input.text()
+        if not raw.strip():
+            return
+        name = self._clean_name(raw, "timer")
+        if name is None:
             return
         rid = self._next_rowid
         self._next_rowid += 1
@@ -1337,9 +1408,11 @@ class MainWindow(QMainWindow):
             QTimer.singleShot(0, lambda: self._scroll_to_row(row["rowid"]))
 
     def _on_add_group(self):
-        raw  = self._add_input.text().strip()
-        name = _SANITIZE.sub("", raw).strip()
-        if not name:
+        raw = self._add_input.text()
+        if not raw.strip():
+            return
+        name = self._clean_name(raw, "separator")
+        if name is None:
             return
         rid = self._next_rowid
         self._next_rowid += 1
@@ -1366,7 +1439,9 @@ class MainWindow(QMainWindow):
         never_again = TickCheckBox("Don't ask again", t["row_running_fg"])
         never_again.setStyleSheet(TickCheckBox.style_for(t))
         box.setCheckBox(never_again)
-        if box.exec() != QMessageBox.Yes:
+        answer = box.exec()
+        self._sync_shift_from_keyboard()
+        if answer != QMessageBox.Yes:
             return False
         if never_again.isChecked():
             setattr(self._state.settings, setting, False)
@@ -1823,8 +1898,11 @@ class MainWindow(QMainWindow):
         bot = top + self._scroll_area.viewport().height()
         for rid in self._running_rids():
             w = self._widgets.get(rid, {}).get("container")
-            if w is None:
-                return True          # hidden inside a collapsed group
+            # Rows inside a collapsed group are BUILT and hidden now, so
+            # they have a container with stale geometry — isHidden is the
+            # check, not None.
+            if w is None or w.isHidden():
+                return True
             if w.y() < top or w.y() + w.height() > bot:
                 return True
         return False
@@ -1894,6 +1972,7 @@ class MainWindow(QMainWindow):
                        for rid in running}
             chosen = menu.exec(self._status_lbl.mapToGlobal(
                 self._status_lbl.rect().bottomLeft()))
+            self._sync_shift_from_keyboard()
             if chosen is not None:
                 self._scroll_to_row(actions[chosen])
 
@@ -1981,7 +2060,7 @@ class MainWindow(QMainWindow):
         font.setUnderline(False)      # the hover underline shouldn't carry in
         editor.setFont(font)
         editor.setAlignment(lbl.alignment())
-        editor.setMaxLength(120)
+        editor.setMaxLength(_NAME_MAX_LEN)
         editor.setStyleSheet(
             f"QLineEdit {{ color: {t['control_fg']};"
             f" background-color: {t['control_bg']};"
@@ -2019,8 +2098,10 @@ class MainWindow(QMainWindow):
         row = next((r for r in self._state.rows if r["rowid"] == rowid), None)
         if row is None:
             return
-        new_name = _SANITIZE.sub("", text).strip()
-        if not new_name or new_name == row["name"]:
+        if not text.strip() or text.strip() == row["name"]:
+            return
+        new_name = self._clean_name(text, row["type"], exclude_rowid=rowid)
+        if new_name is None or new_name == row["name"]:
             return
         self._undo.push(RenameRow(
             f"renaming '{row['name']}'", rowid, row["name"]))
@@ -2076,6 +2157,7 @@ class MainWindow(QMainWindow):
         delete_action = menu.addAction("Delete")
 
         action = menu.exec(global_pos)
+        self._sync_shift_from_keyboard()
         if action is None:
             return
 
@@ -2185,14 +2267,19 @@ class MainWindow(QMainWindow):
 
     def _on_config(self):
         dlg = ConfigDialog(self, self._state.settings.to_dict(), on_reset=self._reset_all)
-        if dlg.exec() != QDialog.Accepted:
+        result = dlg.exec()
+        self._sync_shift_from_keyboard()
+        if result != QDialog.Accepted:
             return
         if dlg.restore_path:
             self._restore_from_snapshot(dlg.restore_path, dlg.restore_mode)
-            return
-        if not dlg.style_changed:
-            return
+            # A restore used to end here. The dialog now asks what to do
+            # with unapplied settings first, and "apply them" means on top
+            # of whatever was just restored.
+        if dlg.style_changed:
+            self._apply_dialog_settings(dlg)
 
+    def _apply_dialog_settings(self, dlg):
         old_aot = self._state.settings.always_on_top
 
         s = self._state.settings
@@ -2331,6 +2418,14 @@ class MainWindow(QMainWindow):
             summary = (f"Restored rows, kept {n} live time"
                        f"{'' if n == 1 else 's'}")
         else:
+            # A completed session is a record of TIMES on a day: bringing
+            # back the theme and window height it happened to be saved
+            # under reads as the restore breaking the app. A backup is the
+            # opposite case — "put everything back the way it was" — and
+            # deliberately still carries the whole state.
+            if PATHS.sessions in path.resolve().parents:
+                new_state.settings      = self._state.settings
+                new_state.window_height = self._state.window_height
             self._state = new_state
             self.timers = {}
             for row in self._timer_rows(self._state.rows):
@@ -3124,8 +3219,12 @@ class MainWindow(QMainWindow):
     #  Updates                                                             #
     # ------------------------------------------------------------------ #
 
-    def _start_update_check(self, forced=False):
+    def _start_update_check(self, forced=False, on_result=None):
         """Look for a newer release on a worker thread.
+
+        `on_result(status, manifest)` is called on the GUI thread with the
+        outcome as well, for a caller that wants to show it somewhere of
+        its own — the settings dialog, which stays open across the check.
 
         Checks on every launch, but only PROMPTS once a day — the check is
         free and silent, the prompt is the thing with a cost. `forced` is a
@@ -3136,27 +3235,37 @@ class MainWindow(QMainWindow):
         import threading
         from ct.core import update
 
+        # The request rides along with its own result. A shared attribute
+        # raced: the automatic launch check and a manual click could both
+        # be in flight, and whichever answered first consumed the other's
+        # `forced`, leaving the button with nothing to show.
+        request = {"forced": forced, "on_result": on_result}
+
         def worker():
             status, manifest = update.check()
             # Back to the GUI thread. Must be a signal, not a QTimer — see
             # the class-level comment on _update_checked.
-            self._update_checked.emit(status, manifest)
+            self._update_checked.emit(status, manifest, request)
 
         threading.Thread(target=worker, daemon=True,
                          name="ct2-update-check").start()
-        self._update_forced = forced
 
-    def _on_update_checked(self, status, manifest):
+    def _on_update_checked(self, status, manifest, request):
         from ct.core import update
         from ct.common.version import __version__ as installed
-        forced = getattr(self, "_update_forced", False)
-        self._update_forced = False
+        forced = request.get("forced", False)
         if status == update.UPDATE:
             self._offer_update(manifest, forced=forced)
         elif forced and status == update.CURRENT:
             self.show_toast(f"You're up to date ({installed})", 4)
         elif forced:
             self.show_toast("Couldn't check for updates right now", 4)
+        on_result = request.get("on_result")
+        if on_result is not None:
+            try:
+                on_result(status, manifest)
+            except RuntimeError:
+                pass          # the dialog that asked has since been closed
 
     def _due_for_update_prompt(self):
         """True if the user has not been shown a prompt in the last 24h.
@@ -3172,6 +3281,8 @@ class MainWindow(QMainWindow):
             last = datetime.fromisoformat(stamp)
         except (ValueError, TypeError):
             return True                      # unreadable: treat as never
+        if last.tzinfo is None:
+            last = last.astimezone()         # foreign stamp: read as local
         return (datetime.now().astimezone() - last).total_seconds() >= 86400
 
     def _offer_update(self, manifest, forced=False):
@@ -3207,6 +3318,10 @@ class MainWindow(QMainWindow):
         from ct.core import update
 
         self.show_toast("Downloading update…", 0)
+        # Closing the app now abandons the thread. The prompt was already
+        # stamped, so without this the offer would not come back for a day
+        # — closeEvent clears the stamp while this is set.
+        self._update_download_active = True
 
         def worker():
             # .get() — a manifest published before checksums existed simply
@@ -3219,6 +3334,7 @@ class MainWindow(QMainWindow):
                          name="ct2-update-download").start()
 
     def _install_update(self, path):
+        self._update_download_active = False
         if path is None:
             self.show_toast("Update download failed - please try again later", 6)
             return
@@ -3367,12 +3483,18 @@ class MainWindow(QMainWindow):
     # ------------------------------------------------------------------ #
 
     def _most_recent_reset_boundary(self):
-        try:
-            rh, rm = map(int, self._state.settings.daily_reset_time.split(":"))
-        except ValueError:
-            rh, rm = 0, 0
-        now = datetime.now().astimezone()
-        boundary_today = now.replace(hour=rh, minute=rm, second=0, microsecond=0)
+        parsed = self._parse_reset_time(self._state.settings.daily_reset_time)
+        rh, rm = parsed if parsed is not None else (0, 0)
+        # Built as NAIVE local wall-clock time and then made aware, so the
+        # boundary carries the UTC offset that applies AT that wall-clock
+        # moment. replace() on an already-aware `now` kept now's fixed
+        # offset instead; on the day DST ends, a reset time inside the
+        # repeated hour was then an hour later in absolute terms the
+        # second time around, and fired twice.
+        local_now = datetime.now()
+        boundary_today = local_now.replace(
+            hour=rh, minute=rm, second=0, microsecond=0).astimezone()
+        now = local_now.astimezone()
         if now >= boundary_today:
             return boundary_today
         return boundary_today - timedelta(days=1)
@@ -3406,6 +3528,10 @@ class MainWindow(QMainWindow):
 
     def closeEvent(self, event):
         try:
+            if getattr(self, "_update_download_active", False):
+                # The user said yes and then left before it finished: ask
+                # again next launch rather than in a day.
+                self._state.settings.last_update_prompt = ""
             self._try_snapshot(reason="app_exit", priority="high")
         except Exception as e:
             QMessageBox.warning(self, "Save Error",

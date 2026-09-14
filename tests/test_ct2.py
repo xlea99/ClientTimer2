@@ -2283,6 +2283,65 @@ class TestQtRestoreAndReset(QtWindowTestBase):
                          "expected the unclamped state to be zeroed")
 
 
+class TestQtSessionRestoreKeepsLiveSettings(QtWindowTestBase):
+    """Restoring a completed SESSION brings back times and rows, not the
+    theme and window height it was archived under. A backup restore still
+    carries the whole state — that one means "put everything back"."""
+
+    def _archived(self, folder, theme, height):
+        """A full state file under `folder`, saved with another look."""
+        from ct.core.config import AppState
+        other = AppState.load()
+        other.rows = [dict(r) for r in self.ROWS]
+        other.settings.theme = theme
+        other.window_height = height
+        folder.mkdir(parents=True, exist_ok=True)
+        path = folder / "session_20260101_120000_000001.json"
+        self._save_at(other, path)
+        return path
+
+    def _save_at(self, state, path):
+        import ct.core.config as cfgmod
+        real = cfgmod._STATE_PATH
+        cfgmod._STATE_PATH = path
+        try:
+            state.save({})
+        finally:
+            cfgmod._STATE_PATH = real
+
+    def setUp(self):
+        super().setUp()
+        # The sessions folder is real user data too — never write there.
+        from ct.common.setup import PATHS
+        self._real_sessions = PATHS.sessions
+        PATHS.sessions = Path(self._tmpdir) / "completed_sessions"
+        self.win._state.settings.theme = "E-Ink (Default)"
+        self.win._state.window_height = 333
+
+    def tearDown(self):
+        from ct.common.setup import PATHS
+        PATHS.sessions = self._real_sessions
+        super().tearDown()
+
+    def test_session_restore_keeps_theme_and_height(self):
+        from ct.common.setup import PATHS
+        path = self._archived(PATHS.sessions, "Billable Hours", 999)
+        self.win._restore_from_snapshot(path, "all")
+        self.settle()
+        self.assertEqual(self.win._state.settings.theme, "E-Ink (Default)")
+        self.assertEqual(self.win._state.window_height, 333)
+        self.assertEqual([r["rowid"] for r in self.win._state.rows],
+                         [r["rowid"] for r in self.ROWS], "rows not restored")
+
+    def test_backup_restore_still_carries_the_whole_state(self):
+        from ct.common.setup import PATHS
+        path = self._archived(PATHS.snapshots, "Billable Hours", 999)
+        self.win._restore_from_snapshot(path, "all")
+        self.settle()
+        self.assertEqual(self.win._state.settings.theme, "Billable Hours")
+        self.assertEqual(self.win._state.window_height, 999)
+
+
 class TestUnknownChoiceReset(unittest.TestCase):
     """A setting naming a THING must name a thing that exists.
 
@@ -4004,6 +4063,407 @@ class TestNameSanitizer(unittest.TestCase):
 
     def test_whitespace_only_becomes_empty(self):
         self.assertEqual(self._sanitize("   "), "")
+
+
+class TestSlotExcepthook(unittest.TestCase):
+    """An exception escaping a Qt slot is logged, and the previous hook
+    still runs (Sentry's integration lives there)."""
+
+    def test_hook_logs_and_chains(self):
+        import sys
+        import ct.__main__ as entry
+        seen = []
+        real = sys.excepthook
+        sys.excepthook = lambda *a: seen.append(a)
+        try:
+            entry._install_slot_excepthook()
+            try:
+                raise RuntimeError("boom in a slot")
+            except RuntimeError:
+                info = sys.exc_info()
+            with self.assertLogs("clienttimer2", level="ERROR") as cm:
+                sys.excepthook(*info)
+        finally:
+            sys.excepthook = real
+        self.assertEqual(len(seen), 1, "previous hook was not chained")
+        self.assertIn("boom in a slot", "\n".join(cm.output))
+
+
+class TestDailyResetTimeValidation(unittest.TestCase):
+    def test_parse_accepts_real_times_only(self):
+        from ct.ui.app import MainWindow
+        self.assertEqual(MainWindow._parse_reset_time("03:00"), (3, 0))
+        self.assertEqual(MainWindow._parse_reset_time("23:59"), (23, 59))
+        for bad in ("25:00", "10:75", "24:00", "3", "", "ab:cd", None, "1:2"):
+            self.assertIsNone(MainWindow._parse_reset_time(bad), bad)
+
+    def test_unknown_choice_reset_covers_the_reset_time(self):
+        from ct.core.config import Settings
+        from ct.ui.app import MainWindow
+        st = Settings(daily_reset_time="25:99")
+        reset = MainWindow._reset_unknown_choices(st)
+        self.assertIn("daily_reset_time", reset)
+        self.assertEqual(st.daily_reset_time, "03:00")
+
+
+class TestQtDailyResetBoundary(QtWindowTestBase):
+    def test_boundary_never_raises_and_is_aware(self):
+        """The old replace() sat outside its try and raised every tick."""
+        w = self.win
+        w._state.settings.daily_reset_time = "25:99"     # slipped past load
+        b = w._most_recent_reset_boundary()
+        self.assertIsNotNone(b.tzinfo)
+        w._state.settings.daily_reset_time = "14:30"
+        b = w._most_recent_reset_boundary()
+        self.assertEqual((b.hour, b.minute, b.second), (14, 30, 0))
+        self.assertIsNotNone(b.tzinfo)
+        # Carries the offset that applies at that wall-clock moment, which
+        # is what makes the DST fall-back day fire once.
+        self.assertEqual(b.utcoffset(), b.replace(tzinfo=None).astimezone().utcoffset())
+        self.assertLessEqual(b, datetime.now().astimezone())
+
+
+class TestQtRunningOffscreen(QtWindowTestBase):
+    def test_running_timer_in_a_collapsed_group_is_offscreen(self):
+        w = self.win
+        w._on_start(11)                       # Alpha, inside Group
+        w._state.collapsed_groups = {10}
+        self.rebuild()
+        self.assertTrue(w._widgets[11]["container"].isHidden())
+        self.assertTrue(w._running_offscreen(),
+                        "a hidden running row must count as off screen")
+        w._state.collapsed_groups = set()
+        self.rebuild()
+        self.assertFalse(w._running_offscreen())
+
+
+class TestNaiveTimestamps(StatePathMixin, unittest.TestCase):
+    def test_naive_session_start_loads_aware(self):
+        from ct.core.config import AppState
+        state = _minimal_state()
+        state["session"]["start"] = "2026-08-07T10:00:00"
+        path = Path(self._tmpdir) / "state.json"
+        path.write_text(json.dumps(state), encoding="utf-8")
+        loaded = AppState.load(path)
+        self.assertIsNotNone(loaded.session_start.tzinfo)
+        # And it can be compared without raising.
+        self.assertIsInstance(loaded.session_start < datetime.now().astimezone(), bool)
+
+
+class TestQtNaiveUpdateStamp(QtWindowTestBase):
+    def test_naive_last_prompt_does_not_raise(self):
+        self.win._state.settings.last_update_prompt = "2026-08-07T10:00:00"
+        self.assertTrue(self.win._due_for_update_prompt())
+
+
+class TestQtUpdateRequestIsolation(QtWindowTestBase):
+    """Two checks in flight each keep their own `forced`."""
+
+    def test_results_carry_their_own_forced_flag(self):
+        w = self.win
+        w._state.settings.last_update_prompt = now_iso()   # gate closed
+        seen = []
+        w._on_update_checked("current", {}, {"forced": False})
+        self.assertEqual(self.toasts, [], "automatic check must stay silent")
+        w._on_update_checked("current", {}, {"forced": True,
+                                              "on_result": lambda s, m: seen.append(s)})
+        self.assertTrue(any("up to date" in t.lower() for t in self.toasts))
+        self.assertEqual(seen, ["current"])
+
+    def test_a_closed_dialog_callback_is_tolerated(self):
+        def dead(status, manifest):
+            raise RuntimeError("Internal C++ object already deleted")
+        self.win._on_update_checked("failed", None, {"forced": False, "on_result": dead})
+
+
+class TestQtNamePolicy(QtWindowTestBase):
+    def test_invisible_only_names_are_refused(self):
+        w = self.win
+        before = len(w._state.rows)
+        w._add_input.setText("\u200b\u200b")
+        w._on_add()
+        self.assertEqual(len(w._state.rows), before)
+        self.assertTrue(any("visible name" in t for t in self.toasts))
+
+    def test_invisible_characters_are_stripped_from_real_names(self):
+        w = self.win
+        w._add_input.setText("Ac\u200bme")
+        w._on_add()
+        self.assertEqual(w._state.rows[-1]["name"], "Acme")
+
+    def test_duplicate_client_is_refused_without_case(self):
+        w = self.win
+        before = len(w._state.rows)
+        w._add_input.setText("  ALPHA ")
+        w._on_add()
+        self.assertEqual(len(w._state.rows), before)
+        self.assertTrue(any("already exists" in t for t in self.toasts))
+
+    def test_a_group_may_share_a_name_with_a_client(self):
+        w = self.win
+        w._add_input.setText("Alpha")
+        w._on_add_group()
+        self.assertEqual(w._state.rows[-1]["type"], "separator")
+
+    def test_rename_to_a_duplicate_is_refused_and_to_itself_is_allowed(self):
+        w = self.win
+        w._apply_rename(12, "alpha")
+        self.assertEqual(w.timers[12].name, "Bravo")
+        self.assertTrue(any("already exists" in t for t in self.toasts))
+        self.toasts.clear()
+        w._apply_rename(12, "Bravo")          # unchanged: no toast, no undo
+        self.assertEqual(self.toasts, [])
+        w._apply_rename(12, "Bravo 2")
+        self.assertEqual(w.timers[12].name, "Bravo 2")
+
+    def test_footer_input_shares_the_rename_cap(self):
+        from ct.ui.app import _NAME_MAX_LEN
+        self.assertEqual(self.win._add_input.maxLength(), _NAME_MAX_LEN)
+        self.win._begin_inline_rename(11)
+        editor = self.win._inline_editor[0]
+        self.assertEqual(editor.maxLength(), _NAME_MAX_LEN)
+        self.win._end_inline_rename(commit=False)
+
+
+class TestQtShiftResync(QtWindowTestBase):
+    def test_stuck_shift_is_cleared_by_a_resync(self):
+        w = self.win
+        w._shift_held = True
+        w._update_shift_labels()
+        w._sync_shift_from_keyboard()         # nothing is really held
+        self.assertFalse(w._shift_held)
+        self.assertEqual(w._widgets[11]["toggle"].text(), "Start")
+
+
+class TestQtAbandonedDownload(QtWindowTestBase):
+    def test_closing_mid_download_clears_the_prompt_stamp(self):
+        w = self.win
+        w._state.settings.last_update_prompt = now_iso()
+        w._update_download_active = True
+        from PySide6.QtGui import QCloseEvent
+        w.closeEvent(QCloseEvent())
+        self.assertEqual(w._state.settings.last_update_prompt, "")
+        self.assertTrue(w._due_for_update_prompt())
+
+    def test_a_finished_download_keeps_the_stamp(self):
+        w = self.win
+        stamp = now_iso()
+        w._state.settings.last_update_prompt = stamp
+        w._update_download_active = True
+        w._install_update(None)               # download reported failure
+        self.assertFalse(w._update_download_active)
+        from PySide6.QtGui import QCloseEvent
+        w.closeEvent(QCloseEvent())
+        self.assertEqual(w._state.settings.last_update_prompt, stamp)
+
+
+class TestNonFiniteElapsed(StatePathMixin, unittest.TestCase):
+    def test_nan_and_infinity_are_zeroed_on_load(self):
+        from ct.core.config import AppState
+        state = _minimal_state()
+        state["layout"]["rows"] = [
+            {"rowid": 1, "name": "A", "type": "timer", "bg": None},
+            {"rowid": 2, "name": "B", "type": "timer", "bg": None},
+            {"rowid": 3, "name": "C", "type": "timer", "bg": None}]
+        state["session"]["tracked_times"] = {
+            "1": {"elapsed": 5.0}, "2": {"elapsed": 1.0}, "3": {"elapsed": "x"}}
+        text = json.dumps(state).replace('"elapsed": 1.0', '"elapsed": NaN')
+        path = Path(self._tmpdir) / "state.json"
+        path.write_text(text, encoding="utf-8")
+        with self.assertLogs("clienttimer2", level="WARNING") as cm:
+            loaded = AppState.load(path)
+        self.assertEqual(loaded.tracked_times["1"]["elapsed"], 5.0)
+        self.assertEqual(loaded.tracked_times["2"]["elapsed"], 0.0)
+        self.assertEqual(loaded.tracked_times["3"]["elapsed"], 0.0)
+        self.assertIn("tracked_times.2.elapsed", "\n".join(cm.output))
+
+
+class TestDebugLogIsCapped(unittest.TestCase):
+    def test_debug_handler_rotates_at_five_megabytes(self):
+        from logging.handlers import RotatingFileHandler
+        from ct.common.logger import log
+        debug = [h for h in log.handlers
+                 if h.get_name() and h.get_name().endswith(":historical_debug")]
+        self.assertEqual(len(debug), 1)
+        self.assertIsInstance(debug[0], RotatingFileHandler)
+        self.assertEqual(debug[0].maxBytes, 5 * 1024 * 1024)
+        self.assertGreaterEqual(debug[0].backupCount, 1)
+
+
+class TestGroupDragEdge(unittest.TestCase):
+    """A header block dropped inside another group's body is carried to
+    that group's edge instead of splitting it."""
+
+    @staticmethod
+    def rows(spec):
+        return [{"rowid": i, "name": n, "type": ("separator" if n.startswith("S") else "timer"), "bg": None}
+                for i, n in enumerate(spec)]
+
+    def edge(self, spec, idx, downward):
+        from ct.ui.drag import DragController
+        return DragController._group_edge(self.rows(spec), idx, downward)
+
+    def test_top_level_positions_are_left_alone(self):
+        self.assertEqual(self.edge(["T1", "T2", "SX", "C"], 1, True), 1)
+        self.assertEqual(self.edge(["T1", "T2", "SX", "C"], 0, False), 0)
+
+    def test_group_edges_are_left_alone(self):
+        rows = ["SY", "T1", "T2", "SX", "C"]
+        self.assertEqual(self.edge(rows, 0, False), 0)      # above SY
+        self.assertEqual(self.edge(rows, 3, True), 3)       # after T2, before SX
+        self.assertEqual(self.edge(rows, 5, True), 5)       # end of list
+
+    def test_inside_a_body_snaps_to_the_edge_being_moved_toward(self):
+        rows = ["SY", "T1", "T2", "T3", "SX", "C", "D", "E"]
+        # Dragging up, landing at T2 (index 2): above SY.
+        self.assertEqual(self.edge(rows, 2, False), 0)
+        # Dragging down, landing after D (index 7): after E.
+        self.assertEqual(self.edge(rows, 7, True), 8)
+        # Right after a header (would become the first child): to the end.
+        self.assertEqual(self.edge(rows, 1, True), 4)
+
+    def test_agent_repro_group_dragged_up_into_another_body(self):
+        """Rows [SY,T1,T2,T3,SX,C,D,E]; SX+children dragged up onto T2 used
+        to give [SY,T1,SX,C,D,E,T2,T3] — Y lost T2 and T3 to X."""
+        from types import SimpleNamespace
+        from ct.ui.drag import DragController
+        rows = self.rows(["SY", "T1", "T2", "T3", "SX", "C", "D", "E"])
+        host = SimpleNamespace()
+        host._state = SimpleNamespace(rows=rows, collapsed_groups=set())
+        host._visible_rowids = [r["rowid"] for r in rows]
+        host._grid_widget = SimpleNamespace(mapFromGlobal=lambda gp: SimpleNamespace(y=lambda: 0))
+        host._parent_group = lambda rid: None
+        dc = DragController.__new__(DragController)
+        dc.host = host
+        dc.dragging_rid = 4                       # SX
+        dc.group_rids = {5, 6, 7}
+        dc.hidden_rids = None
+        dc.visible_rids = set(host._visible_rowids)
+        dc.last_row = 4
+        dc._reorder_visual = lambda: None
+        dc._row_at_y = lambda y: 2                # onto T2
+        dc._update_drag_position(None)
+        self.assertEqual([r["name"] for r in host._state.rows],
+                         ["SX", "C", "D", "E", "SY", "T1", "T2", "T3"])
+
+
+class TestQtDragKeepsStripIndentFresh(QtWindowTestBase):
+    ROWS = [
+        {"rowid": 11, "name": "Alpha", "type": "timer", "bg": None},
+        {"rowid": 10, "name": "Group", "type": "separator", "bg": None},
+        {"rowid": 12, "name": "Bravo", "type": "timer", "bg": None},
+    ]
+
+    def test_bg_left_follows_the_row_into_a_group(self):
+        w = self.win
+        self.assertEqual(w._widgets[11]["bg_left"], 0)
+        # Move Alpha under the group and re-lay in place, as a drag does.
+        w._state.rows = [w._state.rows[1], w._state.rows[0], w._state.rows[2]]
+        w._drag._reorder_visual()
+        self.assertGreater(w._widgets[11]["bg_left"], 0,
+                           "strip indent did not follow the row into the group")
+        self.assertEqual(w._widgets[11]["bg_left"], w._widgets[12]["bg_left"])
+
+
+class TestQtSettingsDialogFootguns(QtWindowTestBase):
+    def dialog(self):
+        from ct.ui.dialogs import ConfigDialog
+        w = self.win
+        # Parented to the window, so it dies with it in tearDown. NOT
+        # addCleanup(deleteLater): cleanups run after tearDown, when the
+        # dialog is already gone.
+        return ConfigDialog(w, w._state.settings.to_dict(), on_reset=w._reset_all)
+
+    def test_untouched_dialog_is_not_dirty(self):
+        dlg = self.dialog()
+        self.assertFalse(dlg._is_dirty())
+        self.assertTrue(dlg._resolve_pending_settings())   # no box needed
+
+    def test_restore_with_dirty_settings_can_apply_them(self):
+        from PySide6.QtWidgets import QMessageBox
+        dlg = self.dialog()
+        other = next(t for t in dlg._theme_names() if t != dlg.chosen_theme) \
+            if hasattr(dlg, "_theme_names") else None
+        if other is None:
+            other = next(dlg._theme.itemText(i) for i in range(dlg._theme.count())
+                         if dlg._theme.itemText(i) != dlg.chosen_theme)
+        dlg._theme.setCurrentText(other)
+        self.assertTrue(dlg._is_dirty())
+        # Click "Apply Settings" in the box.
+        def fake_exec(box_self):
+            btn = next(b for b in box_self.buttons() if b.text() == "Apply Settings")
+            box_self._ct_clicked = btn
+            return 0
+        with patch.object(QMessageBox, "exec", fake_exec), \
+             patch.object(QMessageBox, "clickedButton", lambda b: b._ct_clicked):
+            self.assertTrue(dlg._resolve_pending_settings())
+        self.assertTrue(dlg.style_changed)
+        self.assertEqual(dlg.chosen_theme, other)
+
+    def test_restore_with_dirty_settings_can_be_cancelled(self):
+        from PySide6.QtWidgets import QMessageBox
+        dlg = self.dialog()
+        dlg._confirm_delete.setCurrentText("No" if dlg.chosen_confirm_delete else "Yes")
+        def fake_exec(box_self):
+            box_self._ct_clicked = next(b for b in box_self.buttons() if "Cancel" in b.text())
+            return 0
+        with patch.object(QMessageBox, "exec", fake_exec), \
+             patch.object(QMessageBox, "clickedButton", lambda b: b._ct_clicked):
+            self.assertFalse(dlg._resolve_pending_settings())
+        self.assertFalse(dlg.style_changed)
+
+    def test_check_for_updates_keeps_the_dialog_open(self):
+        dlg = self.dialog()
+        dlg.show()
+        with patch("ct.core.update.check", return_value=("current", {})):
+            dlg._on_check_updates()
+            end = time.time() + 3
+            while time.time() < end and "up to date" not in dlg._update_status.text():
+                self.settle(2); time.sleep(0.02)
+        self.assertIn("up to date", dlg._update_status.text())
+        self.assertTrue(dlg.isVisible(), "the dialog closed itself")
+        self.assertTrue(dlg._check_btn.isEnabled())
+        dlg.close()
+
+    def test_dont_ask_again_survives_a_later_apply(self):
+        w = self.win
+        w._state.settings.confirm_reset = True
+        dlg = self.dialog()
+        self.assertEqual(dlg._confirm_reset.currentText(), "Yes")
+        # The reset's own box ticks "Don't ask again" and writes to disk.
+        def reset_and_disarm():
+            w._state.settings.confirm_reset = False
+            w._save_state()
+        dlg._on_reset = reset_and_disarm
+        dlg._on_reset_clicked()
+        self.assertEqual(dlg._confirm_reset.currentText(), "No")
+        self.assertFalse(dlg._is_dirty(),
+                         "syncing the combo must not read as a user edit")
+        dlg._apply_pending()
+        self.assertFalse(dlg.chosen_confirm_reset)
+
+    def test_a_restore_applies_dirty_settings_afterwards(self):
+        """The main window side: restore first, then the settings the user
+        chose to keep, so they are not lost under the restored state."""
+        from PySide6.QtWidgets import QDialog
+        import ct.ui.app as appmod
+        w = self.win
+        snap = w._try_snapshot                    # stubbed by the base
+        applied = []
+        w._restore_from_snapshot = lambda path, mode: applied.append(("restore", mode))
+        w._apply_dialog_settings = lambda dlg: applied.append(("settings", dlg.chosen_theme))
+
+        class FakeDialog:
+            def __init__(self, *a, **k):
+                self.restore_path = Path("x.json")
+                self.restore_mode = "all"
+                self.style_changed = True
+                self.chosen_theme = "Billable Hours"
+            def exec(self):
+                return QDialog.Accepted
+        with patch.object(appmod, "ConfigDialog", FakeDialog):
+            w._on_config()
+        self.assertEqual(applied, [("restore", "all"), ("settings", "Billable Hours")])
 
 
 class TestPaths(unittest.TestCase):

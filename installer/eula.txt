@@ -39,9 +39,21 @@ EULA, do not install or use the Software.
    EVEN IF THE DEVELOPER HAS BEEN ADVISED OF THE POSSIBILITY OF SUCH
    DAMAGES.
 
-6. DATA HANDLING. The Software stores data locally on your device. The
-   Software does not transmit, collect, or share any user data with the
-   Developer or any third party.
+6. DATA HANDLING. The Software stores its data (client names, tracked
+   times, layout and settings) locally on your device and does not
+   transmit it as part of normal operation.
+
+   The Software includes automatic error reporting. If the Software
+   crashes, or if you choose "Report a Problem" from its settings, a report
+   is sent to the Developer through Sentry, a third-party error-reporting
+   service, and is used only to diagnose and fix defects. A report contains
+   the error and where in the Software it occurred, the Software version,
+   the operating system version, the last part of the Software's own log,
+   and a copy of its settings and layout. Before anything is sent, every
+   client name is replaced with a placeholder, and the Software is
+   configured not to include your username, computer name, IP address, or
+   the contents of program variables. A problem description you type
+   yourself is sent as written. No other data is collected.
 
 7. TERMINATION. This EULA is effective until terminated. It will terminate
    automatically if you fail to comply with any of its terms. Upon
@@ -55,7 +67,7 @@ EULA, do not install or use the Software.
    and the Developer regarding the Software and supersedes all prior
    agreements and understandings, whether written or oral.
 
-Date of Last Revision: March 12, 2026
+Date of Last Revision: September 13, 2026
 
 By installing or using Client Timer 2, you acknowledge that you have read
 and understood this agreement and agree to be bound by its terms.

@@ -337,6 +337,7 @@ class DragController:
                     if nxt_row and nxt_row["type"] != "separator":
                         return  # wait
 
+        downward = target_vis > self.last_row
         if self.group_rids is not None:
             # Group drag
             block = [r for r in h._state.rows
@@ -348,13 +349,9 @@ class DragController:
             target_idx = next(
                 (i for i, r in enumerate(h._state.rows)
                  if r["rowid"] == target_rid), len(h._state.rows))
-            if target_vis > self.last_row:
+            if downward:
                 target_idx += 1
-                if (target_idx > 0
-                        and h._state.rows[target_idx - 1]["type"] == "separator"):
-                    while (target_idx < len(h._state.rows)
-                           and h._state.rows[target_idx]["type"] != "separator"):
-                        target_idx += 1
+            target_idx = self._group_edge(h._state.rows, target_idx, downward)
             for j, br in enumerate(block):
                 h._state.rows.insert(target_idx + j, br)
         else:
@@ -364,16 +361,11 @@ class DragController:
             target_idx = next(
                 i for i, r in enumerate(h._state.rows)
                 if r["rowid"] == target_rid)
-            if target_vis > self.last_row:
-                insert_idx = target_idx + 1
-                if (self.hidden_rids is not None
-                        and h._state.rows[target_idx]["type"] == "separator"):
-                    while (insert_idx < len(h._state.rows)
-                           and h._state.rows[insert_idx]["type"] != "separator"):
-                        insert_idx += 1
-                h._state.rows.insert(insert_idx, drag_row)
-            else:
-                h._state.rows.insert(target_idx, drag_row)
+            insert_idx = target_idx + 1 if downward else target_idx
+            if self.hidden_rids is not None:
+                # A lone header being dragged: same rule as a whole group.
+                insert_idx = self._group_edge(h._state.rows, insert_idx, downward)
+            h._state.rows.insert(insert_idx, drag_row)
 
         # Pre-expand collapsed group that would swallow a single timer
         drag_row_obj = next(
@@ -387,6 +379,34 @@ class DragController:
         self._reorder_visual()
         if drag_rid in h._visible_rowids:
             self.last_row = h._visible_rowids.index(drag_rid)
+
+    @staticmethod
+    def _group_edge(rows, idx, downward):
+        """Snap a header's insertion index out of another group's body.
+
+        Group membership is positional — a timer belongs to the nearest
+        header above it — so a header block inserted between two of
+        another group's children silently splits that group and takes its
+        tail. The only honest places for a header are the top level, right
+        before another header, or right after a group's last child. Inside
+        a body, the block is carried to the edge it was moving toward:
+        below the last child when dragging down, above the header when
+        dragging up. `idx` is an insertion index into `rows`, which no
+        longer contains the block being moved.
+        """
+        head = None
+        for i in range(idx - 1, -1, -1):
+            if rows[i]["type"] == "separator":
+                head = i
+                break
+        if head is None:
+            return idx                     # top-level region: anywhere goes
+        end = head + 1
+        while end < len(rows) and rows[end]["type"] != "separator":
+            end += 1
+        if idx == end:
+            return idx                     # already at the group's end
+        return end if downward else head
 
     def _reorder_visual(self):
         """Lightweight reorder of existing row containers during drag."""
@@ -465,6 +485,13 @@ class DragController:
 
             margin_css = (f"margin-left: {indent_px - 3}px;"
                           if row["type"] == "timer" and is_child else "")
+            # The hover/drag strip is positioned from bg_left, which
+            # RowFactory bakes in at build time. A drag that moves a timer
+            # into or out of a group changes the indent here and nowhere
+            # else, so keep the two in step or the strip floats off the
+            # row's edge until the next full rebuild.
+            h._widgets[rid]["bg_left"] = (
+                (indent_px - 3) if row["type"] == "timer" and is_child else 0)
 
             # The dragged row never draws one — see RowFactory for why. This
             # path rebuilds the stylesheet from scratch on every mouse move,

@@ -130,7 +130,7 @@ class ReportProblemDialog(QDialog):
 
     Two things are deliberate. The description is sent AS WRITTEN — it is
     the one part the user chose to include, and redacting it would turn
-    "Acme's timer stopped" into nonsense. Everything attached alongside it
+    "E Corp's timer stopped" into nonsense. Everything attached alongside it
     is scrubbed, because none of that was chosen. The dialog says both, so
     nobody has to guess what leaves the machine.
     """
@@ -533,7 +533,8 @@ class ConfigDialog(QDialog):
         btn_row.addStretch()
         reset_btn = QPushButton("Reset All Times")
         reset_btn.setFont(QFont("Calibri", 11))
-        reset_btn.clicked.connect(on_reset)
+        self._on_reset = on_reset
+        reset_btn.clicked.connect(self._on_reset_clicked)
         btn_row.addWidget(reset_btn)
         lay.addLayout(btn_row)
 
@@ -593,6 +594,28 @@ class ConfigDialog(QDialog):
     # ------------------------------------------------------------------ #
     #  Backup browser                                                      #
     # ------------------------------------------------------------------ #
+
+    def _on_reset_clicked(self):
+        """Reset, then re-read the confirm flag the reset may have changed.
+
+        The reset's own confirmation box carries "Don't ask again", which
+        writes confirm_reset straight to disk, outside this dialog's
+        Apply/Cancel model. The combo here still said "Yes", so pressing
+        Apply for any unrelated change wrote that stale "Yes" back and
+        silently undid the choice made two clicks earlier.
+        """
+        self._on_reset()
+        main = self.parentWidget()
+        settings = getattr(main, "_state", None)
+        settings = getattr(settings, "settings", None)
+        if settings is None:
+            return
+        live = bool(settings.confirm_reset)
+        self._confirm_reset.setCurrentText("Yes" if live else "No")
+        # It is now the value this dialog opened with, as far as "did
+        # anything change" is concerned.
+        self._initial_cfg["confirm_reset"] = live
+        self.chosen_confirm_reset = live
 
     def _hide_preview(self):
         """Hide the preview panel and shrink the dialog back to fit."""
@@ -681,6 +704,8 @@ class ConfigDialog(QDialog):
             QMessageBox.No,
         )
         if answer == QMessageBox.Yes:
+            if not self._resolve_pending_settings():
+                return
             self.restore_path = path
             self.restore_mode = "all"
             self.accept()
@@ -735,9 +760,37 @@ class ConfigDialog(QDialog):
                 QMessageBox.Yes | QMessageBox.No,
                 QMessageBox.No) != QMessageBox.Yes:
             return
+        if not self._resolve_pending_settings():
+            return
         self.restore_path = path
         self.restore_mode = mode
         self.accept()
+
+    def _resolve_pending_settings(self):
+        """Before a restore closes the dialog: what about unapplied edits?
+
+        A restore accepts the dialog without passing through Apply, so any
+        setting changed but not yet applied would have been dropped without
+        a word. Returns False if the user backed out of the restore.
+        """
+        if not self._is_dirty():
+            return True
+        box = QMessageBox(QMessageBox.Question, "Unapplied Settings",
+                          "You have changed settings that haven't been "
+                          "applied yet.\n\nApply them along with the "
+                          "restore, or drop them?", parent=self)
+        apply_btn = box.addButton("Apply Settings", QMessageBox.AcceptRole)
+        drop_btn = box.addButton("Drop Changes", QMessageBox.DestructiveRole)
+        box.addButton(QMessageBox.Cancel)
+        box.setDefaultButton(apply_btn)
+        box.exec()
+        clicked = box.clickedButton()
+        if clicked is apply_btn:
+            self._apply_pending()
+            return True
+        if clicked is drop_btn:
+            return True
+        return False
 
     def _copy_session_times(self, path, label):
         """Clipboard copy of one saved entry, matching the main window's
@@ -1244,15 +1297,23 @@ class ConfigDialog(QDialog):
             lay.addLayout(row)
 
         row = QHBoxLayout()
-        check_btn = QPushButton("Check for Updates")
-        check_btn.clicked.connect(self._on_check_updates)
-        row.addWidget(check_btn)
+        self._check_btn = QPushButton("Check for Updates")
+        self._check_btn.clicked.connect(self._on_check_updates)
+        row.addWidget(self._check_btn)
         notes_btn = QPushButton("Release Notes")
         notes_btn.setToolTip("Opens the releases page in your browser")
         notes_btn.clicked.connect(self._on_release_notes)
         row.addWidget(notes_btn)
         row.addStretch()
         lay.addLayout(row)
+
+        # Where the check's answer lands. The dialog stays open, so the
+        # answer has to be visible IN it — a toast on the main window would
+        # sit behind this modal.
+        self._update_status = QLabel("")
+        self._update_status.setFont(QFont("Calibri", 11))
+        self._update_status.setWordWrap(True)
+        lay.addWidget(self._update_status)
 
         row2 = QHBoxLayout()
         report_btn = QPushButton("Report a Problem")
@@ -1265,16 +1326,35 @@ class ConfigDialog(QDialog):
         return page
 
     def _on_check_updates(self):
-        """Run a check the user explicitly asked for.
+        """Run a check the user explicitly asked for, and show the answer.
 
-        Closes the dialog first: the answer arrives as a toast on the main
-        window, which would otherwise appear behind this modal and look like
-        nothing happened.
+        The dialog used to close itself first so the main window's toast
+        could be seen — which also threw away every unapplied setting, a
+        hidden Cancel on a button that reads as harmless. Now it stays
+        open and reports on the About page instead. If there IS an update,
+        the main window still gets its "Update Now" toast for when the
+        dialog closes.
         """
         main = self.parentWidget()
-        if main is not None and hasattr(main, "_start_update_check"):
-            self.reject()
-            main._start_update_check(forced=True)
+        if main is None or not hasattr(main, "_start_update_check"):
+            return
+        self._check_btn.setEnabled(False)
+        self._update_status.setText("Checking…")
+        main._start_update_check(forced=True, on_result=self._show_update_result)
+
+    def _show_update_result(self, status, manifest):
+        from ct.core import update
+        from ct.common.version import __version__
+        self._check_btn.setEnabled(True)
+        if status == update.UPDATE:
+            version = (manifest or {}).get("version", "")
+            self._update_status.setText(
+                f"Version {version} is available — close this window and "
+                f"press Update Now.")
+        elif status == update.CURRENT:
+            self._update_status.setText(f"You're up to date ({__version__}).")
+        else:
+            self._update_status.setText("Couldn't check for updates right now.")
 
     def _on_release_notes(self):
         """Open the GitHub releases page — that is where the changelog is.
@@ -1462,7 +1542,7 @@ class ConfigDialog(QDialog):
         grp_lay.setContentsMargins(3, 3, 3, 3)
         grp_lay.setSpacing(6)
         self._p_toggle = QPushButton("\u25BE")
-        self._p_gname = QLabel("Acme Corp")
+        self._p_gname = QLabel("E Corp")
         self._p_gname.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
         self._p_gcount = QLabel("(2)")
         self._p_gcount.setAlignment(Qt.AlignCenter)
@@ -1483,7 +1563,7 @@ class ConfigDialog(QDialog):
         t1_lay.setSpacing(6)
         self._p1_bullet = QLabel("\u2022")
         self._p1_bullet.setAlignment(Qt.AlignCenter)
-        self._p1_name = QLabel("Acme Calls")
+        self._p1_name = QLabel("E Corp Calls")
         self._p1_name.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
         # One button, not two: it reads Stop while running and Start while
         # stopped, exactly like the real row. Row 1 is the running sample.
@@ -1507,7 +1587,7 @@ class ConfigDialog(QDialog):
         t2_lay.setSpacing(6)
         self._p2_bullet = QLabel("")
         self._p2_bullet.setAlignment(Qt.AlignCenter)
-        self._p2_name = QLabel("Acme Tickets")
+        self._p2_name = QLabel("E Corp Tickets")
         self._p2_name.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
         self._p2_start = QPushButton("Start")
         self._p2_time = QLabel("00:07:13")
@@ -1611,9 +1691,9 @@ class ConfigDialog(QDialog):
         bold_label_font = QFont(font_family, s["label"])
         bold_label_font.setBold(True)
         bfm = QFontMetrics(bold_label_font)
-        name_w = max(bfm.horizontalAdvance("Acme Tickets"),
-                     bfm.horizontalAdvance("Acme Calls"),
-                     bfm.horizontalAdvance("Acme Corp")) + 8
+        name_w = max(bfm.horizontalAdvance("E Corp Tickets"),
+                     bfm.horizontalAdvance("E Corp Calls"),
+                     bfm.horizontalAdvance("E Corp")) + 8
         bold_time_font = QFont(font_family, s["time"])
         bold_time_font.setBold(True)
         time_w = QFontMetrics(bold_time_font).horizontalAdvance("00:00:00 ")
@@ -1696,52 +1776,50 @@ class ConfigDialog(QDialog):
     #  Apply                                                               #
     # ------------------------------------------------------------------ #
 
-    def _apply(self):
-        # General
-        self.chosen_always_on_top = (
-            self._always_on_top.currentText() == "Always On Top")
-        self.chosen_confirm_delete = (
-            self._confirm_delete.currentText() == "Yes")
-        self.chosen_confirm_reset = (
-            self._confirm_reset.currentText() == "Yes")
-        self.chosen_recover_running_time = (
-            self._recover_running.currentText() == "Yes")
-        self.chosen_copy_format = self._copy_fmt.currentText()
-        # Daily Reset
-        self.chosen_daily_reset_enabled = (
-            self._daily_reset.currentText() == "On")
+    def _pending_cfg(self):
+        """Every setting as the controls currently show it."""
         t = self._daily_reset_time.time()
-        self.chosen_daily_reset_time = f"{t.hour():02d}:{t.minute():02d}"
-        # Appearance
-        self.chosen_theme = self._theme.currentText()
-        self.chosen_size = self._size.currentText()
-        self.chosen_font = self._font.currentData()
-        self.chosen_label_align = self._align.currentText()
-        self.chosen_client_separators = self._sep.currentText() == "Yes"
-        self.chosen_show_group_count = (
-            self._grp_count.currentText() == "Yes")
-        self.chosen_show_group_time = (
-            self._grp_time.currentText() == "Yes")
-        self.chosen_show_adjust_buttons = self._adj_btns.currentText() == "Yes"
+        return {
+            # General
+            "always_on_top":        self._always_on_top.currentText() == "Always On Top",
+            "confirm_delete":       self._confirm_delete.currentText() == "Yes",
+            "confirm_reset":        self._confirm_reset.currentText() == "Yes",
+            "recover_running_time": self._recover_running.currentText() == "Yes",
+            "copy_format":          self._copy_fmt.currentText(),
+            # Daily Reset
+            "daily_reset_enabled":  self._daily_reset.currentText() == "On",
+            "daily_reset_time":     f"{t.hour():02d}:{t.minute():02d}",
+            # Appearance
+            "theme":                self._theme.currentText(),
+            "size":                 self._size.currentText(),
+            "font":                 self._font.currentData(),
+            "label_align":          self._align.currentText(),
+            "client_separators":    self._sep.currentText() == "Yes",
+            "show_group_count":     self._grp_count.currentText() == "Yes",
+            "show_group_time":      self._grp_time.currentText() == "Yes",
+            "show_adjust_buttons":  self._adj_btns.currentText() == "Yes",
+        }
+
+    def _is_dirty(self):
+        """True if any control differs from what the dialog opened with.
+
+        Compared key by key on the CONTROLS' side: the opening config also
+        carries fields no control edits (last_update_prompt), which must
+        not count.
+        """
+        return any(self._initial_cfg.get(k) != v
+                   for k, v in self._pending_cfg().items())
+
+    def _apply_pending(self):
+        """Commit the controls to chosen_*, without closing the dialog."""
+        chosen = self._pending_cfg()
+        for key, value in chosen.items():
+            setattr(self, f"chosen_{key}", value)
         # Only flag a change if something actually differs from the values
         # the dialog opened with — otherwise Apply is a no-op for the caller.
-        chosen = {
-            "theme":                self.chosen_theme,
-            "size":                 self.chosen_size,
-            "font":                 self.chosen_font,
-            "label_align":          self.chosen_label_align,
-            "client_separators":    self.chosen_client_separators,
-            "show_group_count":     self.chosen_show_group_count,
-            "show_group_time":      self.chosen_show_group_time,
-            "always_on_top":        self.chosen_always_on_top,
-            "confirm_delete":       self.chosen_confirm_delete,
-            "confirm_reset":        self.chosen_confirm_reset,
-            "daily_reset_enabled":  self.chosen_daily_reset_enabled,
-            "daily_reset_time":     self.chosen_daily_reset_time,
-            "show_adjust_buttons":  self.chosen_show_adjust_buttons,
-            "recover_running_time": self.chosen_recover_running_time,
-            "copy_format":          self.chosen_copy_format,
-        }
         self.style_changed = any(
             self._initial_cfg.get(k) != v for k, v in chosen.items())
+
+    def _apply(self):
+        self._apply_pending()
         self.accept()

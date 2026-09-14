@@ -1,6 +1,7 @@
 import copy
 import dataclasses
 import json
+import math
 import os
 from pathlib import Path
 from dataclasses import dataclass
@@ -291,6 +292,21 @@ class AppState:
                     if not isinstance(state["session"].get("tracked_times"), dict):
                         state["session"]["tracked_times"] = {}
                         defaulted_values.add("session.tracked_times")
+                    # json.load accepts NaN and Infinity, and float() is
+                    # happy with both; the first format_time() then blows
+                    # up on display. An elapsed that isn't a finite number
+                    # is zeroed here, where it can be reported, rather than
+                    # crashing the row it belongs to.
+                    for key, entry in state["session"]["tracked_times"].items():
+                        if not isinstance(entry, dict):
+                            continue
+                        el = entry.get("elapsed", 0.0)
+                        ok = (isinstance(el, (int, float))
+                              and not isinstance(el, bool)
+                              and math.isfinite(el))
+                        if not ok:
+                            entry["elapsed"] = 0.0
+                            defaulted_values.add(f"session.tracked_times.{key}.elapsed")
 
                 # Log results
                 if defaulted_values:
@@ -327,6 +343,12 @@ class AppState:
             start = datetime.fromisoformat(state["session"].get("start", now_iso()))
         except (ValueError, TypeError):
             start = datetime.now().astimezone()
+        # A syntactically valid stamp with no offset parses fine and then
+        # raises on its first comparison against an aware datetime. The app
+        # always writes aware stamps, so a naive one is foreign: read it as
+        # local time, which is the only meaning it could have had.
+        if start.tzinfo is None:
+            start = start.astimezone()
         tracked = state["session"]["tracked_times"]
         obj = cls(settings, rows, collapsed, start, tracked)
         obj.window_height = state["layout"].get("window_height", 0)

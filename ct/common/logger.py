@@ -66,8 +66,12 @@ def get_logger(
         historical_debug_path.mkdir(parents=True,exist_ok=True)
         this_historical_debug_log_path =  historical_debug_path / f"{name}_{datetime.now():%Y-%m-%d_%H-%M-%S}.log"
 
-        historical_debug_handler = logging.FileHandler(
+        # Rotating, same cap as the persistent log: this app is left open
+        # for weeks, and one run's DEBUG output has no other bound.
+        historical_debug_handler = RotatingFileHandler(
             filename=this_historical_debug_log_path,
+            maxBytes=5 * 1024 * 1024,
+            backupCount=1,
             encoding="utf-8",
             delay=False
         )
@@ -77,7 +81,8 @@ def get_logger(
         logger.addHandler(historical_debug_handler)
 
         # Prune oldest runs
-        runs = sorted(historical_debug_path.glob(f"{name}_*.log"),key=lambda p: p.stat().st_mtime,reverse=True)
+        # "*.log*" so a rotated ".log.1" is pruned with its run.
+        runs = sorted(historical_debug_path.glob(f"{name}_*.log*"),key=lambda p: p.stat().st_mtime,reverse=True)
         for run in runs[historical_debugs:]:
             try: run.unlink()
             except OSError: pass
