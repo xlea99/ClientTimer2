@@ -6,7 +6,7 @@ from datetime import datetime
 from pathlib import Path
 import random
 from PySide6.QtCore import Qt, QTime, QTimer, QUrl, Signal
-from PySide6.QtGui import QDesktopServices, QFont, QFontMetrics
+from PySide6.QtGui import QDesktopServices, QFont, QFontDatabase, QFontMetrics
 from PySide6.QtWidgets import (
     QPlainTextEdit,
     QAbstractItemView,
@@ -32,6 +32,8 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 from ct.common.setup import PATHS
+from ct.ui.frame import CustomFrame
+from ct.ui.title_bar import TitleBar
 
 # ---------------------------------------------------------------------------
 # Tips
@@ -189,13 +191,19 @@ class ReportProblemDialog(QDialog):
         return self._text.toPlainText().strip()
 
 
-class ConfigDialog(QDialog):
+class ConfigDialog(CustomFrame, QDialog):
+    RESIZE_EDGES = "all"          # a dialog resizes freely, unlike the main window
 
     def __init__(self, parent, cfg, on_reset):
         super().__init__(parent)
         self.setWindowTitle("Settings")
-        self.setWindowFlags(self.windowFlags() | Qt.WindowStaysOnTopHint)
+        # Same custom frame as the main window (ct/ui/frame.py): frameless
+        # to Qt, a real Win32 frame underneath, our own title bar on top.
+        # Set before the native window exists, so nothing is recreated.
+        self.setWindowFlags(self.windowFlags() | Qt.WindowStaysOnTopHint
+                            | Qt.FramelessWindowHint)
         self.setModal(True)
+        self._install_custom_frame()
 
         # Output attributes — read by MainWindow after dialog closes
         self.chosen_theme = cfg.get("theme", "E-Ink (Default)")
@@ -221,7 +229,20 @@ class ConfigDialog(QDialog):
         self._initial_cfg = dict(cfg)
 
         # --- Layout ---
-        outer = QHBoxLayout(self)
+        # shell: [title bar][body], flush; the body carries the dialog's
+        # real layout with the margins a top-level layout would have had.
+        shell = QVBoxLayout(self)
+        shell.setContentsMargins(0, 0, 0, 0)
+        shell.setSpacing(0)
+        has_mdl2 = "Segoe MDL2 Assets" in QFontDatabase.families()
+        self._title_bar = TitleBar("Settings", PATHS.assets / "icon.ico",
+                                   has_mdl2, buttons=("close",))
+        self._title_bar.close_requested.connect(self.close)
+        shell.addWidget(self._title_bar)
+        body = QWidget()
+        shell.addWidget(body, 1)
+        outer = QHBoxLayout(body)
+        outer.setContentsMargins(11, 11, 11, 11)
 
         # Left column: sidebar + pages + apply button
         left_col = QVBoxLayout()
@@ -290,6 +311,26 @@ class ConfigDialog(QDialog):
         self._preview_ctx = None
 
         self._positioned = False
+        # The bar follows the theme combo as it is previewed, so the colour
+        # being tuned is the colour on screen.
+        self._restyle_title_bar(cfg.get("theme"), cfg.get("size"))
+        self._theme.currentTextChanged.connect(
+            lambda name: self._restyle_title_bar(name, self._size.currentText()))
+        self._size.currentTextChanged.connect(
+            lambda name: self._restyle_title_bar(self._theme.currentText(), name))
+
+    def _restyle_title_bar(self, theme_name, size_name):
+        self._title_bar.apply_theme(
+            THEMES.get(theme_name, THEMES["E-Ink (Default)"]),
+            SIZES.get(size_name, SIZES["Regular"]))
+
+    def nativeEvent(self, eventType, message):
+        if eventType == b"windows_generic_MSG":
+            from ctypes import wintypes
+            framed = self._frame_native_event(wintypes.MSG.from_address(int(message)))
+            if framed is not None:
+                return framed
+        return super().nativeEvent(eventType, message)
 
     def showEvent(self, event):
         super().showEvent(event)
@@ -709,7 +750,7 @@ class ConfigDialog(QDialog):
             QMessageBox.No,
         )
         if answer == QMessageBox.Yes:
-            if not self._resolve_pending_settings():
+            if not self._resolve_pending_settings("restore"):
                 return
             self.restore_path = path
             self.restore_mode = "all"
@@ -765,25 +806,27 @@ class ConfigDialog(QDialog):
                 QMessageBox.Yes | QMessageBox.No,
                 QMessageBox.No) != QMessageBox.Yes:
             return
-        if not self._resolve_pending_settings():
+        if not self._resolve_pending_settings("restore"):
             return
         self.restore_path = path
         self.restore_mode = mode
         self.accept()
 
-    def _resolve_pending_settings(self):
-        """Before a restore closes the dialog: what about unapplied edits?
+    def _resolve_pending_settings(self, what="close"):
+        """Before the dialog closes: what about unapplied edits?
 
-        A restore accepts the dialog without passing through Apply, so any
-        setting changed but not yet applied would have been dropped without
-        a word. Returns False if the user backed out of the restore.
+        A restore accepts the dialog without passing through Apply, and a
+        plain close never did, so any setting changed but not yet applied
+        would have been dropped without a word. Returns False if the user
+        chose Cancel — the dialog stays open, nothing happens.
         """
         if not self._is_dirty():
             return True
+        tail = ("Apply them along with the restore, or drop them?"
+                if what == "restore" else "Apply them, or drop them?")
         box = QMessageBox(QMessageBox.Question, "Unapplied Settings",
-                          "You have changed settings that haven't been "
-                          "applied yet.\n\nApply them along with the "
-                          "restore, or drop them?", parent=self)
+                          "You current have changed settings that haven't yet been "
+                          "applied.\n\n" + tail, parent=self)
         apply_btn = box.addButton("Apply Settings", QMessageBox.AcceptRole)
         drop_btn = box.addButton("Drop Changes", QMessageBox.DestructiveRole)
         box.addButton(QMessageBox.Cancel)
@@ -796,6 +839,21 @@ class ConfigDialog(QDialog):
         if clicked is drop_btn:
             return True
         return False
+
+    def reject(self):
+        """Escape, the title bar's X and the window close all land here.
+
+        With unapplied edits, ask the same question a restore asks. Apply
+        turns the close into an accept so the main window applies them;
+        Drop closes as before; Cancel leaves the dialog open.
+        """
+        if self._is_dirty():
+            if not self._resolve_pending_settings("close"):
+                return
+            if self.style_changed:
+                self.accept()
+                return
+        super().reject()
 
     def _copy_session_times(self, path, label):
         """Clipboard copy of one saved entry, matching the main window's

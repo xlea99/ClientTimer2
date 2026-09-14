@@ -43,7 +43,8 @@ class TitleBar(QWidget):
     BUTTON_W = 36
     MIN_H = 30
 
-    def __init__(self, title, icon_path, has_mdl2, parent=None):
+    def __init__(self, title, icon_path, has_mdl2, parent=None,
+                 buttons=("minimize", "grow", "close")):
         super().__init__(parent)
         self.setObjectName("titleBar")
         # A QWidget subclass does not paint a stylesheet background unless
@@ -73,10 +74,13 @@ class TitleBar(QWidget):
         lay.addWidget(self._title, 1)
 
         self._buttons = {}
-        # Windows' order: minimize, then the size button, then close.
+        # Windows' order: minimize, then the size button, then close. A
+        # dialog passes buttons=("close",) — nothing to minimize or grow.
         for key, signal, tip in (("minimize", self.minimize_requested, "Minimize"),
                                  ("grow", self.grow_requested, "Grow to fit the screen"),
                                  ("close", self.close_requested, "Close")):
+            if key not in buttons:
+                continue
             btn = QPushButton()
             btn.setObjectName("titleClose" if key == "close" else "titleBtn")
             btn.setFocusPolicy(Qt.NoFocus)
@@ -174,7 +178,8 @@ class TitleBar(QWidget):
     def mouseDoubleClickEvent(self, event):
         if event.button() == Qt.LeftButton:
             self._press_pos = None
-            self.grow_requested.emit()
+            if "grow" in self._buttons:
+                self.grow_requested.emit()
             return
         super().mouseDoubleClickEvent(event)
 

@@ -4417,6 +4417,67 @@ class TestQtSettingsDialogFootguns(QtWindowTestBase):
             self.assertFalse(dlg._resolve_pending_settings())
         self.assertFalse(dlg.style_changed)
 
+    def _click(self, label):
+        """Patch the next QMessageBox to press the button whose text contains `label`."""
+        from PySide6.QtWidgets import QMessageBox
+        def fake_exec(box_self):
+            box_self._ct_clicked = next(b for b in box_self.buttons() if label in b.text())
+            return 0
+        return (patch.object(QMessageBox, "exec", fake_exec),
+                patch.object(QMessageBox, "clickedButton", lambda b: b._ct_clicked))
+
+    def _dirty_dialog(self):
+        dlg = self.dialog()
+        dlg.show(); self.settle()
+        dlg._confirm_delete.setCurrentText("No" if dlg.chosen_confirm_delete else "Yes")
+        self.assertTrue(dlg._is_dirty())
+        return dlg
+
+    def test_closing_clean_just_closes(self):
+        from PySide6.QtWidgets import QDialog
+        dlg = self.dialog(); dlg.show(); self.settle()
+        dlg.reject(); self.settle()
+        self.assertEqual(dlg.result(), QDialog.Rejected)
+        self.assertFalse(dlg.isVisible())
+
+    def test_closing_dirty_can_apply(self):
+        from PySide6.QtWidgets import QDialog
+        dlg = self._dirty_dialog()
+        a, b = self._click("Apply Settings")
+        with a, b:
+            dlg.reject()
+        self.settle()
+        self.assertEqual(dlg.result(), QDialog.Accepted)
+        self.assertTrue(dlg.style_changed)
+        self.assertFalse(dlg.isVisible())
+
+    def test_closing_dirty_can_drop(self):
+        from PySide6.QtWidgets import QDialog
+        dlg = self._dirty_dialog()
+        a, b = self._click("Drop")
+        with a, b:
+            dlg.reject()
+        self.settle()
+        self.assertEqual(dlg.result(), QDialog.Rejected)
+        self.assertFalse(dlg.style_changed)
+        self.assertFalse(dlg.isVisible())
+
+    def test_closing_dirty_can_cancel_and_stay_open(self):
+        dlg = self._dirty_dialog()
+        a, b = self._click("Cancel")
+        with a, b:
+            dlg.reject()
+        self.settle()
+        self.assertTrue(dlg.isVisible(), "Cancel must keep the dialog open")
+        self.assertTrue(dlg._is_dirty(), "Cancel must keep the edits")
+        # The title bar's X takes the same path.
+        with a, b:
+            dlg._title_bar.close_requested.emit()
+        self.settle()
+        self.assertTrue(dlg.isVisible())
+        dlg._confirm_delete.setCurrentIndex(1 - dlg._confirm_delete.currentIndex())
+        dlg.reject()
+
     def test_check_for_updates_keeps_the_dialog_open(self):
         dlg = self.dialog()
         dlg.show()
@@ -4754,7 +4815,7 @@ class TestQtCustomFrame(QtWindowTestBase):
         self.assertEqual((c.right, c.bottom), (r.right - r.left, r.bottom - r.top))
 
     def test_hit_test_resizes_top_and_bottom_only(self):
-        from ct.ui.app import _HTTOP, _HTBOTTOM, _HTCLIENT
+        from ct.ui.frame import HTTOP as _HTTOP, HTBOTTOM as _HTBOTTOM, HTCLIENT as _HTCLIENT
         r = self.rect()
         cx = (r.left + r.right) // 2
         cy = (r.top + r.bottom) // 2
@@ -4767,7 +4828,7 @@ class TestQtCustomFrame(QtWindowTestBase):
     def test_nchittest_message_is_answered(self):
         import ctypes
         from ctypes import wintypes
-        from ct.ui.app import _HTBOTTOM
+        from ct.ui.frame import HTBOTTOM as _HTBOTTOM
         r = self.rect()
         x, y = (r.left + r.right) // 2, r.bottom - 2
         msg = wintypes.MSG()
@@ -4896,6 +4957,83 @@ class TestQtCustomFrame(QtWindowTestBase):
         self.assertEqual(w.height(), cw.sizeHint().height())
         self.assertGreaterEqual(w.height(), cw.minimumSizeHint().height())
         self.assertGreater(w._last_chrome, w._title_bar.height())
+
+
+class TestQtSettingsDialogFrame(QtWindowTestBase):
+    """The settings dialog wears the same custom frame as the main window:
+    no native caption, no maximize bit, its own close-only title bar."""
+
+    def setUp(self):
+        super().setUp()
+        import sys
+        if sys.platform != "win32":
+            self.skipTest("Win32 frame")
+        from ct.ui.dialogs import ConfigDialog
+        w = self.win
+        self.dlg = ConfigDialog(w, w._state.settings.to_dict(), on_reset=w._reset_all)
+        self.dlg.show()
+        self.settle()
+        import ctypes
+        self.user32 = ctypes.windll.user32
+        self.hwnd = int(self.dlg.winId())
+
+    def tearDown(self):
+        try:
+            self.dlg.close()
+        except RuntimeError:
+            pass
+        super().tearDown()
+
+    def rect(self):
+        from ctypes import wintypes, byref
+        r = wintypes.RECT()
+        self.user32.GetWindowRect(self.hwnd, byref(r))
+        return r
+
+    def test_style_bits_and_client_area(self):
+        from PySide6.QtCore import Qt
+        style = self.user32.GetWindowLongW(self.hwnd, -16)
+        self.assertTrue(style & 0x00040000, "WS_THICKFRAME missing")
+        self.assertFalse(style & 0x00010000, "WS_MAXIMIZEBOX present")
+        self.assertTrue(self.dlg.windowFlags() & Qt.FramelessWindowHint)
+        from ctypes import wintypes, byref
+        c = wintypes.RECT()
+        self.user32.GetClientRect(self.hwnd, byref(c))
+        r = self.rect()
+        self.assertEqual((c.right, c.bottom), (r.right - r.left, r.bottom - r.top))
+
+    def test_bar_is_first_and_close_only(self):
+        shell = self.dlg.layout()
+        self.assertIs(shell.itemAt(0).widget(), self.dlg._title_bar)
+        self.assertEqual(list(self.dlg._title_bar._buttons), ["close"])
+        self.assertEqual(self.dlg._title_bar._full_title, "Settings")
+
+    def test_close_button_closes_the_dialog(self):
+        self.dlg._title_bar.close_requested.emit()
+        self.settle()
+        self.assertFalse(self.dlg.isVisible())
+
+    def test_all_edges_and_corners_resize(self):
+        from ct.ui import frame as F
+        r = self.rect()
+        cx, cy = (r.left + r.right) // 2, (r.top + r.bottom) // 2
+        h = self.dlg._hit_test
+        self.assertEqual(h(r.left + 1, r.top + 1), F.HTTOPLEFT)
+        self.assertEqual(h(r.right - 2, r.top + 1), F.HTTOPRIGHT)
+        self.assertEqual(h(r.left + 1, r.bottom - 2), F.HTBOTTOMLEFT)
+        self.assertEqual(h(r.right - 2, r.bottom - 2), F.HTBOTTOMRIGHT)
+        self.assertEqual(h(r.left + 1, cy), F.HTLEFT)
+        self.assertEqual(h(r.right - 2, cy), F.HTRIGHT)
+        self.assertEqual(h(cx, r.top + 1), F.HTTOP)
+        self.assertEqual(h(cx, r.bottom - 2), F.HTBOTTOM)
+        self.assertEqual(h(cx, cy), F.HTCLIENT)
+
+    def test_bar_follows_the_previewed_theme(self):
+        from ct.ui.theme.colors import THEMES
+        self.dlg._theme.setCurrentText("95 Windows")
+        self.assertIn(THEMES["95 Windows"]["window_header_bg"], self.dlg._title_bar.styleSheet())
+        self.dlg._theme.setCurrentText("E-Ink (Default)")
+        self.assertIn(THEMES["E-Ink (Default)"]["window_header_bg"], self.dlg._title_bar.styleSheet())
 
 
 class TestPaths(unittest.TestCase):
