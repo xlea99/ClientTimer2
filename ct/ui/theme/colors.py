@@ -2,8 +2,8 @@
 #
 #   window_header_*  the window's own title bar (ct/ui/title_bar.py): the bar
 #              fill and the colour of the title text and its three buttons.
-#   use_light_icon   bool: draw the white app icon in the title bar instead
-#              of the black one (assets/icon_light.ico vs icon.ico).
+#              The app icon in the bar is tinted with window_header_fg at
+#              runtime, so it always matches the title text.
 #              Their hover colours (title_*) are derived — see
 #              _derive_title_keys at the bottom.
 
@@ -77,9 +77,8 @@ THEMES = {
         "chrome_line":       "#808080",
         "toast_bg":          "#FFFFE1",
         "toast_fg":          "#000000",
-        "window_header_bg":  "#7A737A",
-        "window_header_fg":  "#BEB7BE",
-        "use_light_icon":    True,
+        "window_header_bg":  "#635D63",
+        "window_header_fg":  "#DFDFDF",
     },
     "A Way": {
         "app_bg":            "#292929",
@@ -108,7 +107,6 @@ THEMES = {
         "toast_fg":          "#1A1606",
         "window_header_bg":  "#1C1C1C",
         "window_header_fg":  "#FDF7D1",
-        "use_light_icon":    True,
     },
     "Billable Hours": {
         "app_bg":            "#0E1A10",
@@ -137,7 +135,6 @@ THEMES = {
         "toast_fg":          "#0E1A10",
         "window_header_bg":  "#17381D",
         "window_header_fg":  "#F3F1D6",
-        "use_light_icon":    True,
     },
     "Burning the Midnight Oil": {
         "app_bg":            "#18110B",
@@ -171,7 +168,6 @@ THEMES = {
         "toast_fg":          "#17130F",
         "window_header_bg":  "#281E13",
         "window_header_fg":  "#BEA68A",
-        "use_light_icon":    True,
     },
     "Busy Signal": {
         "app_bg":            "#171311",
@@ -200,7 +196,6 @@ THEMES = {
         "toast_fg":          "#160B06",
         "window_header_bg":  "#29211D",
         "window_header_fg":  "#F5EEE9",
-        "use_light_icon":    True,
     },
     "Cold Transfer": {
         "app_bg":            "#0C1821",
@@ -229,7 +224,6 @@ THEMES = {
         "toast_fg":          "#07131B",
         "window_header_bg":  "#12384E",
         "window_header_fg":  "#DCEEF2",
-        "use_light_icon":    True,
     },
     "Copper Sunset": {
         "app_bg":            "#161F20",
@@ -263,7 +257,6 @@ THEMES = {
         "toast_fg":          "#17100C",
         "window_header_bg":  "#274042",
         "window_header_fg":  "#DDE8E9",
-        "use_light_icon":    True,
     },
     "Dialpad At Dusk": {
         "app_bg":            "#231735",
@@ -292,7 +285,6 @@ THEMES = {
         "toast_fg":          "#1A1028",
         "window_header_bg":  "#1A1028",
         "window_header_fg":  "#FFF7FB",
-        "use_light_icon":    True,
     },
     "Do Not Disturb": {
         "app_bg":            "#16141C",
@@ -321,7 +313,6 @@ THEMES = {
         "toast_fg":          "#FFFFFF",
         "window_header_bg":  "#1F1D28",
         "window_header_fg":  "#FFFFFF",
-        "use_light_icon":    True,
     },
     "Emergency Calls Only": {
         "app_bg":            "#0B0E11",
@@ -350,7 +341,6 @@ THEMES = {
         "toast_fg":          "#0B0E11",
         "window_header_bg":  "#0F1318",
         "window_header_fg":  "#B9C2C9",
-        "use_light_icon":    True,
     },
     "E-Ink (Default)": {
         "app_bg":            "#FFFFFF",
@@ -379,7 +369,6 @@ THEMES = {
         "toast_fg":          "#FFFFFF",
         "window_header_bg":  "#303030",
         "window_header_fg":  "#FFFFFF",
-        "use_light_icon":    True,
     },
     "Galaxy Dark": {
         "app_bg":            "#010101",
@@ -408,7 +397,6 @@ THEMES = {
         "toast_fg":          "#E1E7EC",
         "window_header_bg":  "#151C21",
         "window_header_fg":  "#E1E7EC",
-        "use_light_icon":    True,
     },
     "Gray Until Further Notice": {
         "app_bg":            "#D8D8D8",
@@ -435,9 +423,8 @@ THEMES = {
         "chrome_line":       "#9E9E9E",
         "toast_bg":          "#707070",
         "toast_fg":          "#FFFFFF",
-        "window_header_bg":  "#707070",
-        "window_header_fg":  "#000000",
-        "use_light_icon":    False,
+        "window_header_bg":  "#C8C8C8",
+        "window_header_fg":  "#1A1A1A",
     },
     "Manila Memories": {
         "app_bg":            "#E2D6C2",
@@ -466,7 +453,6 @@ THEMES = {
         "toast_fg":          "#FFF3DD",
         "window_header_bg":  "#D8C8AE",
         "window_header_fg":  "#4B382B",
-        "use_light_icon":    False,
     },
     "NOCturnal": {
         "app_bg":            "#000000",
@@ -495,7 +481,6 @@ THEMES = {
         "toast_fg":          "#000000",
         "window_header_bg":  "#0A2A0A",
         "window_header_fg":  "#33DD33",
-        "use_light_icon":    False,
     },
     "Out Of Office": {
         "app_bg":            "#F3EFE5",
@@ -524,7 +509,6 @@ THEMES = {
         "toast_fg":          "#F7F1E3",
         "window_header_bg":  "#A4CEC5",
         "window_header_fg":  "#24443F",
-        "use_light_icon":    False,
     },
     "Park In The Forest": {
         "app_bg":            "#E9F2E6",
@@ -553,7 +537,6 @@ THEMES = {
         "toast_fg":          "#FFFFFF",
         "window_header_bg":  "#D2E3CD",
         "window_header_fg":  "#24472D",
-        "use_light_icon":    False,
     },
     "Per My Last Email": {
         "app_bg":            "#000000",
@@ -582,7 +565,6 @@ THEMES = {
         "toast_fg":          "#000000",
         "window_header_bg":  "#1C1C1C",
         "window_header_fg":  "#F5F5F5",
-        "use_light_icon":    True,
     },
     "Single Pane of Glass": {
         "app_bg":            "#E8EEF2",
@@ -611,7 +593,6 @@ THEMES = {
         "toast_fg":          "#FDFDFD",
         "window_header_bg":  "#023F71",
         "window_header_fg":  "#FFFFFF",
-        "use_light_icon":    True,
     },
     "Telecomm Blues": {
         "app_bg":            "#052455",
@@ -640,7 +621,6 @@ THEMES = {
         "toast_fg":          "#191C22",
         "window_header_bg":  "#090E22",
         "window_header_fg":  "#FDFDFD",
-        "use_light_icon":    True,
     },
     "T-Magenta": {
         "app_bg":            "#FFFFFF",
@@ -669,7 +649,6 @@ THEMES = {
         "toast_fg":          "#FFFFFF",
         "window_header_bg":  "#E8E8E8",
         "window_header_fg":  "#262626",
-        "use_light_icon":    False,
     },
     "Your Call Is Important to Us": {
         "app_bg":            "#F3F0FA",
@@ -698,7 +677,6 @@ THEMES = {
         "toast_fg":          "#FFFFFF",
         "window_header_bg":  "#D9CCEC",
         "window_header_fg":  "#302A40",
-        "use_light_icon":    False,
     }
 }
 

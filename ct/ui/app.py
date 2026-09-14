@@ -201,8 +201,7 @@ class MainWindow(QMainWindow):
         outer.setContentsMargins(0, 0, 0, 0)
         outer.setSpacing(0)
         self._title_bar = TitleBar(self.windowTitle(),
-                                   PATHS.assets / "icon.ico", self._has_mdl2,
-                                   light_icon_path=PATHS.assets / "icon_light.ico")
+                                   PATHS.assets / "icon.ico", self._has_mdl2)
         self._title_bar.grow_requested.connect(self._maximize_height)
         self._title_bar.minimize_requested.connect(self.showMinimized)
         self._title_bar.close_requested.connect(self.close)

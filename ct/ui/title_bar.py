@@ -17,7 +17,7 @@ import ctypes
 import sys
 
 from PySide6.QtCore import Qt, QPoint, Signal
-from PySide6.QtGui import QFont, QFontMetrics, QIcon
+from PySide6.QtGui import QColor, QFont, QFontMetrics, QIcon, QPainter, QPixmap
 from PySide6.QtWidgets import QHBoxLayout, QLabel, QPushButton, QSizePolicy, QWidget
 
 _WM_SYSCOMMAND = 0x0112
@@ -43,7 +43,7 @@ class TitleBar(QWidget):
     BUTTON_W = 36
     MIN_H = 30
 
-    def __init__(self, title, icon_path, has_mdl2, parent=None, light_icon_path=None):
+    def __init__(self, title, icon_path, has_mdl2, parent=None):
         super().__init__(parent)
         self.setObjectName("titleBar")
         # A QWidget subclass does not paint a stylesheet background unless
@@ -58,12 +58,10 @@ class TitleBar(QWidget):
 
         self._icon = QLabel()
         self._icon.setObjectName("titleIcon")
-        # Black ink and white ink; the theme's use_light_icon picks.
-        self._icon_sources = {
-            False: QIcon(str(icon_path)) if icon_path else QIcon(),
-            True: (QIcon(str(light_icon_path)) if light_icon_path
-                   else (QIcon(str(icon_path)) if icon_path else QIcon())),
-        }
+        # The icon is single-ink on transparent: only its alpha is used,
+        # and the ink is painted in window_header_fg at theme time, so it
+        # always matches the title text — no per-theme icon variants.
+        self._icon_source = QIcon(str(icon_path)) if icon_path else QIcon()
         lay.addWidget(self._icon)
 
         self._title = QLabel(title)
@@ -100,9 +98,9 @@ class TitleBar(QWidget):
         h = max(self.MIN_H, QFontMetrics(font).height() + 12)
         self.setFixedHeight(h)
         self._icon.setFixedSize(h - 12, h - 12)
-        source = self._icon_sources[bool(theme.get("use_light_icon", False))]
-        if not source.isNull():
-            self._icon.setPixmap(source.pixmap(h - 12, h - 12))
+        fg = theme.get("window_header_fg", "#000000")
+        if not self._icon_source.isNull():
+            self._icon.setPixmap(self._tinted(self._icon_source.pixmap(h - 12, h - 12), fg))
 
         glyph_font = (QFont("Segoe MDL2 Assets", 8) if self._has_mdl2
                       else QFont(self.font().family(), 10))
@@ -125,6 +123,19 @@ class TitleBar(QWidget):
             f"#titleBar QPushButton#titleClose:hover {{"
             f"  background-color: {close_bg}; color: {close_fg}; }}")
         self._elide()
+
+    @staticmethod
+    def _tinted(pixmap, colour):
+        """The pixmap's alpha, filled with `colour`."""
+        out = QPixmap(pixmap.size())
+        out.setDevicePixelRatio(pixmap.devicePixelRatio())
+        out.fill(Qt.transparent)
+        p = QPainter(out)
+        p.drawPixmap(0, 0, pixmap)
+        p.setCompositionMode(QPainter.CompositionMode_SourceIn)
+        p.fillRect(0, 0, out.width(), out.height(), QColor(colour))
+        p.end()
+        return out
 
     def set_title(self, text):
         self._full_title = text

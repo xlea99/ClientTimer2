@@ -3520,7 +3520,7 @@ class TestThemeColors(unittest.TestCase):
         "chrome_line",
         "toast_bg", "toast_fg",
         "window_header_bg", "window_header_fg", "title_hover_bg",
-        "title_close_hover_bg", "title_close_hover_fg", "use_light_icon",
+        "title_close_hover_bg", "title_close_hover_fg",
     ]
 
     def test_all_themes_have_required_keys(self):
@@ -3555,9 +3555,6 @@ class TestThemeColors(unittest.TestCase):
         for name, t in THEMES.items():
             for key, val in t.items():
                 if key == "control_border_px":
-                    continue
-                if key == "use_light_icon":
-                    self.assertIsInstance(val, bool, f"Theme '{name}' use_light_icon is not a bool")
                     continue
                 self.assertTrue(
                     val.startswith("#") or val.startswith("rgb"),
@@ -4857,35 +4854,37 @@ class TestQtCustomFrame(QtWindowTestBase):
         # A point in the bar's empty middle, away from icon, text and buttons.
         x = bar.width() // 2
         y = bar.height() - 3
-        self.assertEqual(img.pixelColor(x, y).name().upper(), "#000000")
+        from ct.ui.theme.colors import THEMES
+        want = THEMES["E-Ink (Default)"]["window_header_bg"].upper()
+        self.assertEqual(img.pixelColor(x, y).name().upper(), want)
 
-    def test_theme_picks_the_light_or_dark_icon(self):
-        """The two icons are the same alpha with opposite ink: sample the
-        darkest opaque pixel of whatever the bar is showing."""
+    def test_icon_takes_the_header_text_colour(self):
+        """The icon is a mask tinted with window_header_fg, so NOCturnal
+        gets a green clock without a green icon file."""
         from PySide6.QtGui import QColor
+        from ct.ui.theme.colors import THEMES
         w = self.win
         bar = w._title_bar
 
         def ink():
-            # pixelColor, not QColor(img.pixel()): the latter drops alpha,
-            # so every transparent pixel read as opaque black.
             img = bar._icon.pixmap().toImage()
-            vals = [img.pixelColor(x, y).lightness()
-                    for x in range(img.width()) for y in range(img.height())
-                    if img.pixelColor(x, y).alpha() > 200]
-            self.assertTrue(vals, "icon pixmap has no opaque pixels")
-            return sum(vals) / len(vals)
+            px = [img.pixelColor(x, y)
+                  for x in range(img.width()) for y in range(img.height())
+                  if img.pixelColor(x, y).alpha() > 250]
+            self.assertTrue(px, "icon pixmap has no opaque pixels")
+            n = len(px)
+            return QColor(sum(c.red() for c in px) // n,
+                          sum(c.green() for c in px) // n,
+                          sum(c.blue() for c in px) // n)
 
-        w._state.settings.theme = "E-Ink (Default)"       # black header, light icon
-        w._apply_style()
-        self.assertGreater(ink(), 200, "dark header should show the white icon")
-        w._state.settings.theme = "Your Call Is Important to Us"   # light header
-        w._apply_style()
-        self.assertLess(ink(), 60, "light header should show the black icon")
-
-    def test_light_icon_ships(self):
-        from ct.common.setup import PATHS
-        self.assertTrue((PATHS.assets / "icon_light.ico").exists())
+        for theme in ("NOCturnal", "E-Ink (Default)", "Your Call Is Important to Us"):
+            w._state.settings.theme = theme
+            w._apply_style()
+            want = QColor(THEMES[theme]["window_header_fg"])
+            got = ink()
+            for ch in ("red", "green", "blue"):
+                self.assertLessEqual(abs(getattr(got, ch)() - getattr(want, ch)()), 3,
+                                     f"{theme}: icon ink {got.name()} != {want.name()}")
 
     def test_fit_still_lands_on_the_content(self):
         """The bar is chrome like any other: one row plus chrome, no dead
