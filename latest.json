@@ -1,7 +1,7 @@
 {
-  "version": "2.4.0",
+  "version": "2.4.1",
   "released": "2026-09-14",
-  "url": "https://github.com/xlea99/ClientTimer2/releases/download/2.4.0/ClientTimer2_Setup_2.4.0.exe",
-  "sha256": "dea421a45d9bb6f2d3bb0fc96bc29dfc9dd565bb732e6e3f2f76a74b81f2b337",
+  "url": "https://github.com/xlea99/ClientTimer2/releases/download/2.4.1/ClientTimer2_Setup_2.4.1.exe",
+  "sha256": "23ce6738c318cba30162fbcc0ff2fa84dd258bec6721d830be9baa734c570119",
   "notes": "Many small bug and usability fixes"
 }
