@@ -4296,61 +4296,129 @@ class TestDebugLogIsCapped(unittest.TestCase):
         self.assertGreaterEqual(debug[0].backupCount, 1)
 
 
-class TestGroupDragEdge(unittest.TestCase):
-    """A header block dropped inside another group's body is carried to
-    that group's edge instead of splitting it."""
+class TestHeaderDragLandsWhereDropped(unittest.TestCase):
+    """A dragged header goes exactly where it is dropped, even into the
+    middle of another group — that is how a group is split. 2.4.0 snapped
+    it to the enclosing group's edge instead, and with one big group that
+    was the whole list: dragging the bottom header up jumped it to the
+    very top, dragging it back snapped it to the bottom."""
+
+    @staticmethod
+    def host(rows):
+        from types import SimpleNamespace
+        h = SimpleNamespace()
+        h._state = SimpleNamespace(rows=rows, collapsed_groups=set())
+        h._visible_rowids = [r["rowid"] for r in rows]
+        h._grid_widget = SimpleNamespace(mapFromGlobal=lambda gp: SimpleNamespace(y=lambda: 0))
+        h._parent_group = lambda rid: None
+        return h
 
     @staticmethod
     def rows(spec):
         return [{"rowid": i, "name": n, "type": ("separator" if n.startswith("S") else "timer"), "bg": None}
                 for i, n in enumerate(spec)]
 
-    def edge(self, spec, idx, downward):
+    def controller(self, h, drag_rid, from_vis, group_rids=None):
         from ct.ui.drag import DragController
-        return DragController._group_edge(self.rows(spec), idx, downward)
-
-    def test_top_level_positions_are_left_alone(self):
-        self.assertEqual(self.edge(["T1", "T2", "SX", "C"], 1, True), 1)
-        self.assertEqual(self.edge(["T1", "T2", "SX", "C"], 0, False), 0)
-
-    def test_group_edges_are_left_alone(self):
-        rows = ["SY", "T1", "T2", "SX", "C"]
-        self.assertEqual(self.edge(rows, 0, False), 0)      # above SY
-        self.assertEqual(self.edge(rows, 3, True), 3)       # after T2, before SX
-        self.assertEqual(self.edge(rows, 5, True), 5)       # end of list
-
-    def test_inside_a_body_snaps_to_the_edge_being_moved_toward(self):
-        rows = ["SY", "T1", "T2", "T3", "SX", "C", "D", "E"]
-        # Dragging up, landing at T2 (index 2): above SY.
-        self.assertEqual(self.edge(rows, 2, False), 0)
-        # Dragging down, landing after D (index 7): after E.
-        self.assertEqual(self.edge(rows, 7, True), 8)
-        # Right after a header (would become the first child): to the end.
-        self.assertEqual(self.edge(rows, 1, True), 4)
-
-    def test_agent_repro_group_dragged_up_into_another_body(self):
-        """Rows [SY,T1,T2,T3,SX,C,D,E]; SX+children dragged up onto T2 used
-        to give [SY,T1,SX,C,D,E,T2,T3] — Y lost T2 and T3 to X."""
-        from types import SimpleNamespace
-        from ct.ui.drag import DragController
-        rows = self.rows(["SY", "T1", "T2", "T3", "SX", "C", "D", "E"])
-        host = SimpleNamespace()
-        host._state = SimpleNamespace(rows=rows, collapsed_groups=set())
-        host._visible_rowids = [r["rowid"] for r in rows]
-        host._grid_widget = SimpleNamespace(mapFromGlobal=lambda gp: SimpleNamespace(y=lambda: 0))
-        host._parent_group = lambda rid: None
         dc = DragController.__new__(DragController)
-        dc.host = host
-        dc.dragging_rid = 4                       # SX
-        dc.group_rids = {5, 6, 7}
-        dc.hidden_rids = None
-        dc.visible_rids = set(host._visible_rowids)
-        dc.last_row = 4
+        dc.host = h
+        dc.dragging_rid = drag_rid
+        dc.group_rids = group_rids
+        is_sep = next(r for r in h._state.rows if r["rowid"] == drag_rid)["type"] == "separator"
+        dc.hidden_rids = set() if (group_rids is None and is_sep) else None
+        dc.visible_rids = set(h._visible_rowids)
+        dc.last_row = from_vis
         dc._reorder_visual = lambda: None
-        dc._row_at_y = lambda y: 2                # onto T2
+        return dc
+
+    def drag(self, rows, drag_rid, from_vis, to_vis):
+        h = self.host(rows)
+        dc = self.controller(h, drag_rid, from_vis)
+        dc._row_at_y = lambda y: to_vis
         dc._update_drag_position(None)
-        self.assertEqual([r["name"] for r in host._state.rows],
-                         ["SX", "C", "D", "E", "SY", "T1", "T2", "T3"])
+        return [r["name"] for r in h._state.rows]
+
+    def test_bottom_header_dragged_up_one_row_moves_one_row(self):
+        """The user's layout: one big group, an empty header at the end."""
+        spec = ["S-Beans"] + [f"t{i}" for i in range(10)] + ["S-Main"]
+        out = self.drag(self.rows(spec), drag_rid=11, from_vis=11, to_vis=10)
+        self.assertEqual(out, ["S-Beans"] + [f"t{i}" for i in range(9)] + ["S-Main", "t9"])
+
+    def test_header_dropped_mid_group_splits_it(self):
+        out = self.drag(self.rows(["S-Y", "t1", "t2", "t3", "S-X"]), drag_rid=4, from_vis=4, to_vis=2)
+        self.assertEqual(out, ["S-Y", "t1", "S-X", "t2", "t3"])
+
+    def test_no_ping_pong_across_a_full_drag_up_and_back(self):
+        """Step the bottom header up one row at a time, then back down.
+        Every step must move it by at most one position."""
+        spec = ["S-Beans"] + [f"t{i}" for i in range(20)] + ["S-Main"]
+        h = self.host(self.rows(spec))
+        dc = self.controller(h, drag_rid=21, from_vis=21)
+        positions = []
+        for target in list(range(20, 0, -1)) + list(range(2, 22)):
+            dc._row_at_y = lambda y, t=target: t
+            dc._update_drag_position(None)
+            h._visible_rowids = [r["rowid"] for r in h._state.rows]
+            dc.last_row = h._visible_rowids.index(21)
+            positions.append(dc.last_row)
+        jumps = [abs(b - a) for a, b in zip(positions, positions[1:])]
+        self.assertTrue(all(j <= 1 for j in jumps), f"header jumped: {positions}")
+
+    def test_moving_down_onto_a_header_waits_then_lands_after_its_group(self):
+        rows = self.rows(["S-A", "t1", "S-B", "t2", "t3", "t4"])
+        # Onto the header itself: the drag waits (overshoot guard), nothing moves.
+        self.assertEqual(self.drag(rows, drag_rid=0, from_vis=0, to_vis=2),
+                         ["S-A", "t1", "S-B", "t2", "t3", "t4"])
+        # Past its last child: lands after the group, never inside it.
+        self.assertEqual(self.drag(self.rows(["S-A", "t1", "S-B", "t2", "t3", "t4"]), drag_rid=0, from_vis=0, to_vis=5),
+                         ["t1", "S-B", "t2", "t3", "t4", "S-A"])
+
+
+class TestQtGroupArrowFollowsAutoExpand(QtWindowTestBase):
+    """Every path that opens a group without the toggle — dropping a
+    collapsed group, dragging a timer into one, adding under one — must
+    flip the arrow too. It used to stay pointing right."""
+
+    ROWS = [
+        {"rowid": 10, "name": "Group", "type": "separator", "bg": None},
+        {"rowid": 11, "name": "Alpha", "type": "timer", "bg": None},
+        {"rowid": 12, "name": "Bravo", "type": "timer", "bg": None},
+        {"rowid": 13, "name": "Charlie", "type": "timer", "bg": None},
+    ]
+    RIGHT, DOWN = "\u25B8", "\u25BE"
+
+    def arrow(self):
+        return self.win._widgets[10]["group_toggle"].text()
+
+    def test_dropping_a_collapsed_group_opens_it_and_the_arrow(self):
+        w = self.win
+        w._state.collapsed_groups = {10}
+        self.rebuild()
+        self.assertEqual(self.arrow(), self.RIGHT)
+        w._drag.start(10)                     # collapsed: a group drag
+        w._drag._reorder_visual()
+        w._drag.end()                         # a dropped group is opened
+        self.settle()
+        self.assertNotIn(10, w._state.collapsed_groups)
+        self.assertEqual(self.arrow(), self.DOWN, "arrow stayed collapsed after the drop")
+
+    def test_adding_under_a_collapsed_group_flips_the_arrow(self):
+        w = self.win
+        w._state.collapsed_groups = {10}
+        self.rebuild()
+        w._add_input.setText("Delta")
+        w._on_add()
+        self.settle()
+        self.assertEqual(self.arrow(), self.DOWN)
+
+    def test_refresh_alone_syncs_the_arrow_both_ways(self):
+        w = self.win
+        w._state.collapsed_groups = {10}
+        w._refresh_group_headers()
+        self.assertEqual(self.arrow(), self.RIGHT)
+        w._state.collapsed_groups = set()
+        w._refresh_group_headers()
+        self.assertEqual(self.arrow(), self.DOWN)
 
 
 class TestQtDragKeepsStripIndentFresh(QtWindowTestBase):

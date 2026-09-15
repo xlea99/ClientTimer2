@@ -1410,11 +1410,7 @@ class MainWindow(CustomFrame, QMainWindow):
         # row can be shown, like every other add.
         parent = self._parent_group(rid)
         if parent is not None and parent in self._state.collapsed_groups:
-            self._state.collapsed_groups.discard(parent)
-            w = self._widgets.get(parent)
-            btn = w.get("group_toggle") if w else None
-            if btn is not None:
-                btn.setText("\u25be")
+            self._state.collapsed_groups.discard(parent)   # arrow: _refresh_group_headers
         self._save_state()
         self._try_snapshot(reason="layout_change", priority="medium")
         self._add_row_to_ui(row)
@@ -2718,6 +2714,14 @@ class MainWindow(CustomFrame, QMainWindow):
             if ss.show_group_time:
                 w["time"].setText(format_time(self._group_total_time(rid)))
             self._update_group_bold(rid)
+            # The arrow too. Several paths open a group without going
+            # through the toggle — dropping a collapsed group, dragging a
+            # timer into one, adding a client under one — and every one
+            # of them ends here, so this is where the glyph follows the
+            # truth in `collapsed_groups`.
+            btn = w.get("group_toggle")
+            if btn is not None:
+                btn.setText("\u25B8" if rid in self._state.collapsed_groups else "\u25BE")
 
     def _update_all_displays(self):
         for rid in self.timers:
