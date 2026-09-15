@@ -38,3 +38,7 @@ Python 3.12+. Windows only for now BFS for now.
 ## Stack
 
 Python - PySide6 - Sentry - Inno Setup
+
+## License
+
+ClientTimer is proprietary software. See the EULA included with the installer. The source is published for reference, not for reuse.
