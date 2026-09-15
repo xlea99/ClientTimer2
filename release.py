@@ -69,8 +69,8 @@ for _stream in (sys.stdout, sys.stderr):
 # Leaving a stale VERSION here after a release is harmless: the next run
 # fails on "not newer than the current X" before it writes anything.
 
-VERSION = "2.3.0"        # e.g. "2.4.0"
-NOTES = "UI and usability update"          # one line, shown in the update toast
+VERSION = "2.4.0"        # e.g. "2.4.0"
+NOTES = "Many small bug and usability fixes"          # one line, shown in the update toast
 
 REBUILD = False     # re-cut a version that is ALREADY the current one
 SKIP_TESTS = False  # don't fucking do it

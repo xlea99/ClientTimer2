@@ -1,7 +1,7 @@
 {
-  "version": "2.3.0",
-  "released": "2026-08-07",
-  "url": "https://github.com/xlea99/ClientTimer2/releases/download/2.3.0/ClientTimer2_Setup_2.3.0.exe",
-  "sha256": "835fb62f943aa385a7666019cf72ff8e18e5e3d15f6b51062d3fb2883cde41d8",
-  "notes": "UI and usability update"
+  "version": "2.4.0",
+  "released": "2026-09-14",
+  "url": "https://github.com/xlea99/ClientTimer2/releases/download/2.4.0/ClientTimer2_Setup_2.4.0.exe",
+  "sha256": "dea421a45d9bb6f2d3bb0fc96bc29dfc9dd565bb732e6e3f2f76a74b81f2b337",
+  "notes": "Many small bug and usability fixes"
 }
