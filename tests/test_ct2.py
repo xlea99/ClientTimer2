@@ -4196,30 +4196,31 @@ class TestQtNamePolicy(QtWindowTestBase):
         w._on_add()
         self.assertEqual(w._state.rows[-1]["name"], "Acme")
 
-    def test_duplicate_client_is_refused_without_case(self):
+    def test_duplicate_names_are_allowed(self):
+        """2.4.0 refused these for one day. People keep the same client
+        under more than one heading; that must work."""
         w = self.win
         before = len(w._state.rows)
+        w._add_input.setText("Alpha")
+        w._on_add()
+        self.assertEqual(len(w._state.rows), before + 1)
+        self.assertEqual([r["name"] for r in w._state.rows].count("Alpha"), 2)
         w._add_input.setText("  ALPHA ")
         w._on_add()
-        self.assertEqual(len(w._state.rows), before)
-        self.assertTrue(any("already exists" in t for t in self.toasts))
-
-    def test_a_group_may_share_a_name_with_a_client(self):
-        w = self.win
+        self.assertEqual(len(w._state.rows), before + 2)
+        self.assertFalse(any("already exists" in t for t in self.toasts))
         w._add_input.setText("Alpha")
         w._on_add_group()
         self.assertEqual(w._state.rows[-1]["type"], "separator")
 
-    def test_rename_to_a_duplicate_is_refused_and_to_itself_is_allowed(self):
+    def test_rename_to_an_existing_name_is_allowed(self):
         w = self.win
-        w._apply_rename(12, "alpha")
-        self.assertEqual(w.timers[12].name, "Bravo")
-        self.assertTrue(any("already exists" in t for t in self.toasts))
+        w._apply_rename(12, "Alpha")
+        self.assertEqual(w.timers[12].name, "Alpha")
+        self.assertFalse(any("already exists" in t for t in self.toasts))
         self.toasts.clear()
-        w._apply_rename(12, "Bravo")          # unchanged: no toast, no undo
+        w._apply_rename(12, "Alpha")          # unchanged: no toast, no undo
         self.assertEqual(self.toasts, [])
-        w._apply_rename(12, "Bravo 2")
-        self.assertEqual(w.timers[12].name, "Bravo 2")
 
     def test_footer_input_shares_the_rename_cap(self):
         from ct.ui.app import _NAME_MAX_LEN

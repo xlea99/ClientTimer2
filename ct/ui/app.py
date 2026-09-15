@@ -1370,29 +1370,27 @@ class MainWindow(CustomFrame, QMainWindow):
     def _clean_name(self, raw, kind, exclude_rowid=None):
         """The one place a name is accepted or refused.
 
-        Returns the cleaned name, or None after toasting why not. Refused
-        outright rather than quietly fixed up:
+        Returns the cleaned name, or None after toasting why not. Control
+        characters and invisible formatting characters (zero width space
+        and friends) are stripped, and a name that is nothing else is
+        refused — it would render as a blank row.
 
-          * control characters and invisible formatting characters (zero
-            width space and friends) are stripped, and a name that is
-            nothing else is empty — it would render as a blank row
-          * a duplicate of another row of the same kind, compared without
-            case, is refused — snapshot restore matches by name when a
-            rowid is gone, and two "Acme"s make that a coin toss
+        Duplicate names are ALLOWED, on purpose. 2.4.0 refused them for a
+        day; several people run lists with the same client under more
+        than one heading, and refusing that broke their workflow. The
+        one cost is the audit's point — a times-only restore matches by
+        name when a rowid is gone, and picks the first of two "Acme"s —
+        and that is the lesser evil by a mile. `exclude_rowid` is kept
+        so a rename can be told apart from an add if that ever matters.
         """
         text = _SANITIZE.sub("", raw)
         text = "".join(ch for ch in text
                        if unicodedata.category(ch) not in ("Cf", "Cc", "Zl", "Zp"))
         name = text.strip()[:_NAME_MAX_LEN].strip()
-        label = "client" if kind == "timer" else "separator"
         if not name:
+            label = "client" if kind == "timer" else "separator"
             self.show_toast(f"A {label} needs a visible name", 4)
             return None
-        for r in self._state.rows:
-            if (r["type"] == kind and r["rowid"] != exclude_rowid
-                    and r["name"].casefold() == name.casefold()):
-                self.show_toast(f"A {label} named '{r['name']}' already exists", 4)
-                return None
         return name
 
     def _on_add(self):
