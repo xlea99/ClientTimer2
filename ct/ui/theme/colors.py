@@ -331,7 +331,7 @@ THEMES = {
         "group_bg":          "#0F1318",
         "group_hover_bg":    "#171D24",
         "group_drag_bg":     "#202A34",
-        "group_fg":          "#6E7880",
+        "group_fg":          "#85929C",
         "group_running_fg":  "#FF3B30",
         "group_line":        "#232A31",
         "group_hover_line":  "#4C5964",

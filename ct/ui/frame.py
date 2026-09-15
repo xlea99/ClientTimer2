@@ -45,6 +45,10 @@ class _MARGINS(ctypes.Structure):
 
 class CustomFrame:
     RESIZE_EDGES = "vertical"       # or "all"
+    # The side strips can be narrower than the top and bottom ones. The
+    # main window's width is automatic — a side drag only springs back —
+    # so its sides are a slim target; a dialog keeps them full width.
+    SIDE_BORDER_PX = _RESIZE_BORDER_PX
 
     def _install_custom_frame(self):
         """Give the frameless window a real Win32 frame, minus the caption.
@@ -97,14 +101,16 @@ class CustomFrame:
         """
         rect = wintypes.RECT()
         ctypes.windll.user32.GetWindowRect(int(self.winId()), ctypes.byref(rect))
-        border = max(1, round(_RESIZE_BORDER_PX * self.devicePixelRatio()))
+        dpr = self.devicePixelRatio()
+        border = max(1, round(_RESIZE_BORDER_PX * dpr))
+        side = max(1, round(self.SIDE_BORDER_PX * dpr))
         if not (rect.left <= x_phys < rect.right and rect.top <= y_phys < rect.bottom):
             return HTCLIENT
         top = y_phys < rect.top + border
         bottom = y_phys >= rect.bottom - border
         if self.RESIZE_EDGES == "all":
-            left = x_phys < rect.left + border
-            right = x_phys >= rect.right - border
+            left = x_phys < rect.left + side
+            right = x_phys >= rect.right - side
             if top and left:
                 return HTTOPLEFT
             if top and right:

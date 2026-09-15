@@ -4921,6 +4921,13 @@ class TestQtCustomFrame(QtWindowTestBase):
         self.assertEqual(h(r.left + 1, r.top + 1), F.HTTOPLEFT)
         self.assertEqual(h(cx, cy), F.HTCLIENT)
         self.assertEqual(h(r.right + 50, cy), F.HTCLIENT)
+        # Sides are a slimmer target than top and bottom on the main window.
+        dpr = self.win.devicePixelRatio()
+        side = round(self.win.SIDE_BORDER_PX * dpr)
+        vert = round(F._RESIZE_BORDER_PX * dpr)
+        self.assertLess(side, vert)
+        self.assertEqual(h(r.left + side, cy), F.HTCLIENT, "side strip wider than set")
+        self.assertEqual(h(cx, r.top + vert - 1), F.HTTOP, "top strip narrower than set")
 
     def test_nchittest_message_is_answered(self):
         import ctypes

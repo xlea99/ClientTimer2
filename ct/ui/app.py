@@ -107,6 +107,7 @@ class MainWindow(CustomFrame, QMainWindow):
     # drag snaps straight back on release — which is the point. Stretching
     # the window and watching it spring back is part of the feel.
     RESIZE_EDGES = "all"
+    SIDE_BORDER_PX = 4
 
     # Results from the update worker threads come back through these, NOT
     # through QTimer.singleShot. A QTimer created on a plain threading.Thread
