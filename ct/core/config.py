@@ -114,7 +114,9 @@ class Settings:
     # Entries stay FOREVER. This is the only record of a name that a user's
     # state.json may still hold, and an install can sit unopened for months.
     _THEME_RENAMES = {
-        "T-Magentle": "T-Magenta",      # renamed 2026-08-06
+        # Both hops: a 2.3.x file may still say either of the old names.
+        "T-Magentle": "Hot Line",       # renamed 2026-08-06, and again below
+        "T-Magenta":  "Hot Line",       # renamed 2026-09-15
         # Capitalisation only ("is" -> "Is"). Invisible in the UI, and a
         # completely different string to state.json — which is exactly why
         # it needs an entry: nothing about it LOOKS like a rename.

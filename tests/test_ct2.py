@@ -2395,7 +2395,7 @@ class TestUnknownChoiceReset(unittest.TestCase):
         from ct.ui.app import MainWindow
         s = Settings.from_dict({"theme": "T-Magentle"})
         keys = MainWindow._reset_unknown_choices(s)
-        self.assertEqual(s.theme, "T-Magenta")
+        self.assertEqual(s.theme, "Hot Line")
         self.assertEqual(keys, [])
 
 
@@ -3757,7 +3757,7 @@ class TestThemeRenames(unittest.TestCase):
     def test_a_renamed_theme_follows_its_new_name(self):
         """T-Magentle shipped from 2026-02-14, so it is in real users'
         state.json. Without this they silently land on the default."""
-        self.assertEqual(self.migrate(theme="T-Magentle").theme, "T-Magenta")
+        self.assertEqual(self.migrate(theme="T-Magentle").theme, "Hot Line")
 
     def test_every_rename_target_actually_exists(self):
         """Renaming a theme twice and forgetting to update the map would
@@ -3787,7 +3787,7 @@ class TestThemeRenames(unittest.TestCase):
         d.pop("show_adjust_buttons")
         d["button_visibility"] = "None"
         s = Settings.from_dict(d)
-        self.assertEqual(s.theme, "T-Magenta")
+        self.assertEqual(s.theme, "Hot Line")
         self.assertFalse(s.show_adjust_buttons)
 
     def test_migration_does_not_mutate_the_caller_dict(self):
