@@ -14,9 +14,13 @@ A desktop time tracker for people who bill against a lot of clients and don't wa
 - **Groups.** Drag clients under collapsible separator rows. Each separator can show its child count and aggregate time, and lights up when anything under it is running.
 - **UI lock.** Unlock the UI to rearrange it to your liking, add new timers, delete old ones, etc. Lock it so you don't accidentally break your configuration during daily use.
 - **Daily auto-reset (optional).** Pick a time, and every timer zeroes out once per day, even if the app wasn't open when the clock hit. Saved sessions are then available in Settings forever as history.
-- **Themes.** Twenty+ hand-built color profiles, from "muted corporate blue" to "I'm edgy and I like my timer to look like a radar".
+- **Themes.** Twenty+ hand-built color profiles, from "muted corporate blue" to "I want my timer to look like a radar".
 
-![Theme picker](docs/screenshot-themes.png)
+<p align="center">
+  <img src="docs/screenshot-out-of-office.png" width="32%" alt="Vaguely coastal">
+  <img src="docs/screenshot-95-windows.png" width="32%" alt="Throwback">
+  <img src="docs/screenshot-cold-transfer.png" width="32%" alt="Too cold to ask">
+</p>
 
 ## Under the hood
 
