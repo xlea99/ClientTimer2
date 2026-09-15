@@ -203,7 +203,15 @@ class ConfigDialog(CustomFrame, QDialog):
         self.setWindowFlags(self.windowFlags() | Qt.WindowStaysOnTopHint
                             | Qt.FramelessWindowHint)
         self.setModal(True)
-        self._install_custom_frame()
+        # The frame is installed in showEvent, NOT here. Installing needs
+        # winId(), and asking a parented dialog for its native handle
+        # before it is shown makes Qt turn the PARENT's central widget
+        # into a native child window when the dialog appears. That child
+        # then covers the main window's whole client area — which, with
+        # no non-client area, includes its resize edges — and every edge
+        # drag went to it instead. Reproduced with a stock QDialog too;
+        # it is Qt, not the frame.
+        self._frame_installed = False
 
         # Output attributes — read by MainWindow after dialog closes
         self.chosen_theme = cfg.get("theme", "E-Ink (Default)")
@@ -333,6 +341,9 @@ class ConfigDialog(CustomFrame, QDialog):
         return super().nativeEvent(eventType, message)
 
     def showEvent(self, event):
+        if not self._frame_installed:
+            self._frame_installed = True
+            self._install_custom_frame()      # see __init__ for why here
         super().showEvent(event)
         # Position beside the main window instead of covering it, so the
         # timers stay visible while tweaking settings.
@@ -356,8 +367,13 @@ class ConfigDialog(CustomFrame, QDialog):
         y = max(screen.top(), min(pgeo.top(), screen.bottom() - h))
         self.move(x, y)
 
+    _HISTORY_TAB = 2
+
     def _on_tab_changed(self, index):
         self._stack.setCurrentIndex(index)
+        if index == self._HISTORY_TAB and not self._sessions_loaded:
+            self._sessions_loaded = True
+            self._load_sessions()
         # Hide preview, backup browser, and clear selections when switching tabs.
         # Block table signals to prevent clearSelection from re-triggering
         # _on_table_selected and re-showing the preview.
@@ -1308,7 +1324,11 @@ class ConfigDialog(CustomFrame, QDialog):
         btn_row.addWidget(self._sessions_folder_btn)
         lay.addLayout(btn_row)
 
-        self._load_sessions()
+        # Not loaded here. Every completed session file is read and parsed
+        # to fill this table — one file per working day, forever — and
+        # that cost sat on OPENING the dialog, which lands on the General
+        # page. It runs the first time the History tab is shown instead.
+        self._sessions_loaded = False
 
         lay.addStretch()
 

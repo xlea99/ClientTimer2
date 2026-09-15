@@ -184,15 +184,20 @@ class TitleBar(QWidget):
         super().mouseDoubleClickEvent(event)
 
     def _start_system_move(self):
-        """Hand the drag to Windows' own move loop.
+        """Hand the drag to Windows' own move loop, through Qt.
 
-        ReleaseCapture first: Qt captured the mouse on press, and the OS
-        loop needs it. SendMessage blocks until the drop, which is fine —
-        nothing here has anything to do until then.
+        QWindow.startSystemMove sends the same SC_MOVE the raw Win32 call
+        did, but Qt also releases its own mouse capture and forgets the
+        press. The raw call left Qt believing the button was still held
+        after the drop; on the next mouse move it re-captured the mouse,
+        and a window holding capture is never asked WM_NCHITTEST — so the
+        edge-resize cursor, and resizing itself, silently went away.
         """
         win = self.window()
-        if sys.platform != "win32" or win is None:
+        handle = win.windowHandle() if win is not None else None
+        if handle is not None and handle.startSystemMove():
             return
-        user32 = ctypes.windll.user32
-        user32.ReleaseCapture()
-        user32.SendMessageW(int(win.winId()), _WM_SYSCOMMAND, _SC_MOVE_CAPTION, 0)
+        if sys.platform == "win32" and win is not None:
+            user32 = ctypes.windll.user32       # fallback, pre-6 Qt
+            user32.ReleaseCapture()
+            user32.SendMessageW(int(win.winId()), _WM_SYSCOMMAND, _SC_MOVE_CAPTION, 0)

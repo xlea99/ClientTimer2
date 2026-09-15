@@ -4478,6 +4478,31 @@ class TestQtSettingsDialogFootguns(QtWindowTestBase):
         dlg._confirm_delete.setCurrentIndex(1 - dlg._confirm_delete.currentIndex())
         dlg.reject()
 
+    def test_history_loads_on_first_visit_only(self):
+        dlg = self.dialog()
+        calls = []
+        real = dlg._load_sessions
+        dlg._load_sessions = lambda: (calls.append(1), real())
+        self.assertEqual(calls, [], "sessions were read at open")
+        self.assertEqual(dlg._session_table.rowCount(), 0)
+        dlg._tab_list.setCurrentRow(2)            # History
+        self.assertEqual(calls, [1])
+        dlg._tab_list.setCurrentRow(1)
+        dlg._tab_list.setCurrentRow(2)
+        self.assertEqual(calls, [1], "re-read on every visit")
+
+    def test_title_bar_move_goes_through_qt(self):
+        """startSystemMove keeps Qt's button state straight; the raw
+        SC_MOVE call left it thinking the mouse was still down, which
+        re-captured the mouse and killed edge resizing."""
+        from unittest.mock import MagicMock
+        bar = self.win._title_bar
+        handle = MagicMock()
+        handle.startSystemMove.return_value = True
+        with patch.object(type(self.win), "windowHandle", return_value=handle):
+            bar._start_system_move()
+        handle.startSystemMove.assert_called_once()
+
     def test_check_for_updates_keeps_the_dialog_open(self):
         dlg = self.dialog()
         dlg.show()
@@ -4814,16 +4839,19 @@ class TestQtCustomFrame(QtWindowTestBase):
         r = self.rect()
         self.assertEqual((c.right, c.bottom), (r.right - r.left, r.bottom - r.top))
 
-    def test_hit_test_resizes_top_and_bottom_only(self):
-        from ct.ui.frame import HTTOP as _HTTOP, HTBOTTOM as _HTBOTTOM, HTCLIENT as _HTCLIENT
+    def test_hit_test_resizes_every_edge(self):
+        from ct.ui import frame as F
         r = self.rect()
         cx = (r.left + r.right) // 2
         cy = (r.top + r.bottom) // 2
-        self.assertEqual(self.win._hit_test(cx, r.top + 1), _HTTOP)
-        self.assertEqual(self.win._hit_test(cx, r.bottom - 2), _HTBOTTOM)
-        self.assertEqual(self.win._hit_test(cx, cy), _HTCLIENT)
-        self.assertEqual(self.win._hit_test(r.left + 1, cy), _HTCLIENT, "sides must not resize")
-        self.assertEqual(self.win._hit_test(r.right + 50, cy), _HTCLIENT)
+        h = self.win._hit_test
+        self.assertEqual(h(cx, r.top + 1), F.HTTOP)
+        self.assertEqual(h(cx, r.bottom - 2), F.HTBOTTOM)
+        self.assertEqual(h(r.left + 1, cy), F.HTLEFT)
+        self.assertEqual(h(r.right - 2, cy), F.HTRIGHT)
+        self.assertEqual(h(r.left + 1, r.top + 1), F.HTTOPLEFT)
+        self.assertEqual(h(cx, cy), F.HTCLIENT)
+        self.assertEqual(h(r.right + 50, cy), F.HTCLIENT)
 
     def test_nchittest_message_is_answered(self):
         import ctypes
@@ -5001,6 +5029,25 @@ class TestQtSettingsDialogFrame(QtWindowTestBase):
         self.user32.GetClientRect(self.hwnd, byref(c))
         r = self.rect()
         self.assertEqual((c.right, c.bottom), (r.right - r.left, r.bottom - r.top))
+
+    def test_showing_the_dialog_leaves_the_main_window_alone(self):
+        """Day-one 2.4.0 bug: after Settings opened, the main window's
+        central widget had become a native child window covering the
+        whole client area, and every edge drag went to it. Cause: the
+        frame install asked the parented dialog for winId() before it
+        was shown."""
+        from PySide6.QtCore import Qt
+        cw = self.win.centralWidget()
+        self.assertFalse(cw.testAttribute(Qt.WA_NativeWindow))
+        self.assertIsNone(cw.windowHandle(), "central widget became a native window")
+        self.dlg.close(); self.settle()
+        self.assertIsNone(cw.windowHandle())
+        # And Windows still finds the MAIN window at its own bottom edge.
+        r = W = None
+        from ctypes import wintypes, byref
+        r = wintypes.RECT(); self.user32.GetWindowRect(int(self.win.winId()), byref(r))
+        pt = wintypes.POINT((r.left + r.right) // 2, r.bottom - 3)
+        self.assertEqual(self.user32.WindowFromPoint(pt), int(self.win.winId()))
 
     def test_bar_is_first_and_close_only(self):
         shell = self.dlg.layout()

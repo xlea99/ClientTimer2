@@ -103,6 +103,10 @@ class _RowViewport(QScrollArea):
 
 
 class MainWindow(CustomFrame, QMainWindow):
+    # All edges, not just top and bottom: width is automatic, so a side
+    # drag snaps straight back on release — which is the point. Stretching
+    # the window and watching it spring back is part of the feel.
+    RESIZE_EDGES = "all"
 
     # Results from the update worker threads come back through these, NOT
     # through QTimer.singleShot. A QTimer created on a plain threading.Thread
@@ -124,7 +128,7 @@ class MainWindow(CustomFrame, QMainWindow):
         # Frameless as far as Qt is concerned: it draws no caption and
         # believes the frame is zero-width, which matches what the window
         # actually shows once _install_custom_frame (ct/ui/frame.py) has
-        # had its say. RESIZE_EDGES stays "vertical": width is automatic.
+        # had its say.
         flags = Qt.Window | Qt.FramelessWindowHint
         if state.settings.always_on_top:
             flags |= Qt.WindowStaysOnTopHint

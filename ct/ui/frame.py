@@ -35,7 +35,7 @@ HTBOTTOM, HTBOTTOMLEFT, HTBOTTOMRIGHT = 15, 16, 17
 _GWL_STYLE = -16
 _WS_MAXIMIZEBOX, _WS_MINIMIZEBOX = 0x00010000, 0x00020000
 _WS_THICKFRAME, _WS_CAPTION = 0x00040000, 0x00C00000
-_RESIZE_BORDER_PX = 6           # logical; the strip along an edge that resizes
+_RESIZE_BORDER_PX = 8           # logical; the strip along an edge that resizes
 
 
 class _MARGINS(ctypes.Structure):
