@@ -15,7 +15,7 @@ An update check is exactly the comparison of those two. Never derive one
 from the other at runtime.
 """
 
-__version__ = "2.4.1"
+__version__ = "2.4.2"
 
 # ISO-8601, and a plain string on purpose: the About page displays it and the
 # manifest carries the same value, so parsing it into a date object here would
