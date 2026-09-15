@@ -5,7 +5,7 @@ A desktop time tracker for people who bill against a lot of clients and don't wa
 **[Download the latest installer here](../../releases/latest)**, or view all releases.
 
 <p align="center">
-  <img src="docs/screenshot-main.png" width="600" alt="ClientTimer2 main window">
+  <img src="docs/screenshot-main.png" width="300" alt="ClientTimer2 main window">
 </p>
 
 ---
